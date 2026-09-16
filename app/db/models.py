@@ -15,6 +15,11 @@ def _new_event_id() -> str:
     return str(uuid4())
 
 
+def _new_runtime_device_id() -> str:
+    """Transitional id for callers that Task 2 will replace with explicit device_id."""
+    return f"legacy-runtime-{uuid4()}"
+
+
 class BloodGroup(str, Enum):
     A_POS = "A+"
     A_NEG = "A-"
@@ -118,7 +123,7 @@ class FCMToken(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id", index=True)
     token: Optional[str] = Field(default=None, unique=True, index=True)
-    device_id: str
+    device_id: str = Field(default_factory=_new_runtime_device_id)
     device_info: str = Field(default="android")
     is_active: bool = Field(default=True, index=True)
     last_seen_at: datetime = Field(default_factory=utc_now)
