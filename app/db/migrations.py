@@ -1,16 +1,14 @@
-"""
-Additive schema migrations.
+"""Historical pre-Alembic SQLite migration helpers.
 
-`SQLModel.metadata.create_all` creates missing *tables* but never adds a column
-to a table that already exists, so a development database created before the
-email/password columns existed would keep working right up until the first query
-touched one of them. The project has no Alembic setup, so this module applies the
-few additive changes by hand, idempotently, at startup.
+This module is retained only for understanding/recovering databases created by
+older P1 development builds. It is **not** part of application startup and must
+not be imported from ``app.main``. P2 and later use Alembic exclusively for
+schema ownership; existing unversioned P1 SQLite files must be migrated through
+``scripts/migrate_existing_db.py``.
 
-Rules kept deliberately narrow:
-  * only ADD COLUMN — nothing is dropped, renamed, or retyped;
-  * every step checks the current schema first, so a second run is a no-op;
-  * no user rows are deleted or rewritten beyond the one documented backfill.
+The functions below intentionally remain SQLite-specific and narrowly additive
+so an operator investigating an old database can reproduce the former P1
+behavior without changing the P2 runtime contract.
 """
 
 import logging
@@ -37,26 +35,16 @@ def _tables(session: Session) -> set[str]:
 
 
 def _add_column(session: Session, table: str, column: str, ddl: str) -> bool:
-    """Add `column` if absent. Returns True when the column was just created."""
+    """Add ``column`` if absent; historical P1 behavior only."""
     if column in _columns(session, table):
         return False
     session.exec(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
-    logger.info("Migration: added %s.%s", table, column)
+    logger.info("Legacy migration: added %s.%s", table, column)
     return True
 
 
 def _run_users_email_verification(session: Session) -> Iterable[str]:
-    """
-    Add the email-verification columns to `users`.
-
-    Backfill policy for accounts that predate this migration: they are marked
-    verified. Every existing account was created either through Google sign-in
-    (where Google has already verified the address) or through the development
-    login, and defaulting them to unverified would lock real people out of
-    working accounts to enforce a check that did not exist when they signed up.
-    New accounts start unverified — the default on the column — so the guarantee
-    holds from here forward.
-    """
+    """Reproduce the former P1 email-verification additive migration."""
     applied: list[str] = []
 
     added_verified = _add_column(
@@ -74,8 +62,6 @@ def _run_users_email_verification(session: Session) -> Iterable[str]:
         applied.append("users.auth_provider")
 
     if added_verified:
-        # Only on the run that created the column, so a later manual
-        # "unverify" is never silently undone.
         result = session.exec(
             text(
                 "UPDATE users SET email_verified = 1, "
@@ -83,13 +69,11 @@ def _run_users_email_verification(session: Session) -> Iterable[str]:
             )
         )
         logger.info(
-            "Migration: grandfathered %s pre-existing account(s) as verified",
+            "Legacy migration: grandfathered %s pre-existing account(s) as verified",
             result.rowcount,
         )
         applied.append(f"backfill:{result.rowcount}-existing-users-verified")
 
-    # Keep the summary column honest for accounts that already have a password
-    # (none today, but the migration must not lie if one exists).
     session.exec(
         text(
             "UPDATE users SET auth_provider = CASE "
@@ -104,17 +88,15 @@ def _run_users_email_verification(session: Session) -> Iterable[str]:
 
 
 def run_migrations() -> list[str]:
-    """Apply legacy additive migrations on SQLite only.
+    """Reproduce the old P1 SQLite-only runtime migration when invoked manually.
 
-    PostgreSQL and other production-grade databases must use versioned schema
-    migrations (Alembic). Skipping the SQLite PRAGMA path there is deliberate: a
-    DATABASE_URL change must never execute SQLite-specific SQL against another
-    dialect.
+    P2 application startup never calls this function. Use Alembic for every
+    current schema change, and use ``scripts/migrate_existing_db.py`` to safely
+    bootstrap an unversioned P1 SQLite database into Alembic history.
     """
     if engine.dialect.name != "sqlite":
         logger.info(
-            "Skipping legacy SQLite migrations for database dialect %s; "
-            "use versioned migrations for schema changes",
+            "Legacy migration helper skipped for database dialect %s; use Alembic",
             engine.dialect.name,
         )
         return []
@@ -122,11 +104,10 @@ def run_migrations() -> list[str]:
     applied: list[str] = []
     with Session(engine) as session:
         if "users" not in _tables(session):
-            # Fresh database: create_all already produced the current schema.
             return applied
         applied.extend(_run_users_email_verification(session))
         session.commit()
 
     if applied:
-        logger.info("Migrations applied: %s", ", ".join(applied))
+        logger.info("Legacy migrations applied: %s", ", ".join(applied))
     return applied
