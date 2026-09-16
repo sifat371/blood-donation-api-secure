@@ -1,0 +1,40 @@
+# Backend ignores. See ../.gitignore for the repository-wide rules; these are
+# repeated here so the backend directory is safe on its own if it is ever
+# extracted into its own repository.
+
+# ── Secrets ──────────────────────────────────────────────
+#
+# .env holds SECRET_KEY (JWT signing), GOOGLE_CLIENT_ID and GEMINI_API_KEY.
+# serviceAccount.json is a real Firebase service-account private key.
+# Commit .env.example instead — it documents the variables without the values.
+.env
+.env.*
+!.env.example
+app/serviceAccount.json
+*serviceAccount*.json
+
+# ── Local database and the backups the coordinate-repair script writes ──
+*.db
+*.sqlite
+*.sqlite3
+blood_donation.backup-*.db
+
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# ── Logs ─────────────────────────────────────────────────
+*.log
+
+# ── Development mail outbox ──────────────────────────────
+# Written by MAIL_BACKEND=outbox. Each .eml contains a live verification code.
+dev_outbox/
+*.eml
