@@ -115,14 +115,24 @@ def expire_stale_requests(session: Session, *, commit: bool = True) -> int:
             BloodRequest.needed_date < business_today(),
         )
     ).all()
+
+    expired: list[BloodRequest] = []
     for blood_request in stale:
+        # Once any unit is secured, the donor/recipient arrangement remains
+        # active even after the original needed date. Only an entirely
+        # unsecured overdue request may auto-expire; secured requests require
+        # explicit completion/cancellation/withdrawal actions.
+        if commitment_counts(session, blood_request.id).secured > 0:
+            continue
         _expire_request_in_transaction(session, blood_request)
-    if stale:
+        expired.append(blood_request)
+
+    if expired:
         if commit:
             session.commit()
         else:
             session.flush()
-    return len(stale)
+    return len(expired)
 
 
 def expire_request_if_stale(
@@ -131,6 +141,7 @@ def expire_request_if_stale(
     if (
         blood_request.status in _OPEN_REQUEST_STATUSES
         and blood_request.needed_date < business_today()
+        and commitment_counts(session, blood_request.id).secured == 0
     ):
         _expire_request_in_transaction(session, blood_request)
         if commit:
