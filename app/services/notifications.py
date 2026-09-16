@@ -3,8 +3,10 @@
 import json
 from typing import Optional
 
+from firebase_admin import messaging
 from sqlmodel import Session, select
 
+from app.core.firebase import is_fcm_available
 from app.db.models import FCMToken, Notification, NotificationDelivery, NotificationType
 
 
