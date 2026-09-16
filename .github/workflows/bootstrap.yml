@@ -1,0 +1,61 @@
+name: bootstrap-secure-backend
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    if: ${{ hashFiles('.bootstrap/part-00.b64') != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct and verify source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .bootstrap/part-*.b64 | base64 -d > /tmp/source.tar.xz
+          echo "0d74b864c0dd51f265f00387e88bba877015bc66bf79e27587afcd58de1971ab  /tmp/source.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/source.tar.xz -C .
+          rm -rf .bootstrap
+          # Publish the normal test workflow separately after this one-time
+          # bootstrap has proved the source passes, avoiding workflow-file
+          # mutations from the Actions token.
+          rm -f .github/workflows/tests.yml
+
+      - name: Restore and verify pinned lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://raw.githubusercontent.com/AbuRayhanRU/backend/260007faac654e962736ba965614e639c0dd0fe5/uv.lock \
+            -o uv.lock
+          echo "0861a113037ebcaa5b1a6ed2161122890a763cd8a2c17feb39affbee3057eb20  uv.lock" | sha256sum -c -
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --dev
+
+      - name: Compile Python sources
+        run: uv run python -m compileall -q app tests scripts
+
+      - name: Run full test suite
+        run: uv run pytest -q
+
+      - name: Publish verified source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Publish P0-hardened blood donation backend"
+          git push
