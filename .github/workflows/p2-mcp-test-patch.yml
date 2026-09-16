@@ -1,0 +1,27 @@
+name: p2-mcp-test-patch
+
+on:
+  push:
+    branches: [p2-core]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: p2-core
+      - run: python scripts/patch_p2_mcp_tests.py
+      - name: Commit patched tests and remove one-shot helper
+        run: |
+          rm scripts/patch_p2_mcp_tests.py
+          rm .github/workflows/p2-mcp-test-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/test_mcp_tools.py scripts/patch_p2_mcp_tests.py .github/workflows/p2-mcp-test-patch.yml
+          git commit -m "test: align legacy MCP lifecycle with P2"
+          git push origin HEAD:p2-core
