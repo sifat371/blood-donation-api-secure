@@ -43,4 +43,4 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --dev
       - run: uv run alembic upgrade head
-      - run: uv run pytest -q tests/test_alembic_migrations.py tests/test_commitment_service.py tests/test_api_blood_requests.py
+      - run: uv run pytest -q tests/test_alembic_migrations.py tests/test_commitment_service.py tests/test_api_blood_requests.py tests/test_postgres_integration.py
