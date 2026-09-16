@@ -262,7 +262,11 @@ def list_commitments_for_user(
 
     all_commitments = _commitments_for_request(session, request_id)
     if blood_request.recipient_id == user.id:
-        visible = all_commitments
+        visible = [
+            item
+            for item in all_commitments
+            if item.status in _SECURED_COMMITMENT_STATUSES
+        ]
     else:
         visible = [item for item in all_commitments if item.donor_id == user.id]
         if not visible:
