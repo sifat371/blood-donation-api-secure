@@ -9,7 +9,6 @@ permissions:
 
 jobs:
   bootstrap:
-    if: ${{ hashFiles('.bootstrap/part-00.b64') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
