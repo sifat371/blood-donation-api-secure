@@ -139,9 +139,10 @@ compatibility still require screening by qualified healthcare/blood-bank staff.
 ### Time and request expiry
 
 Calendar-day rules use `BUSINESS_TIMEZONE` (default `Asia/Dhaka`). New requests
-may target today or a future date; overdue open requests are marked `Expired`
-and are no longer shown to donors or eligible for new commitments. Stored
-application timestamps remain UTC for database compatibility.
+may target today or a future date. An overdue request auto-expires only while it
+has zero secured units; once a unit is committed or completed, the request stays
+active until explicit completion, cancellation, or withdrawal changes its
+lifecycle. Stored application timestamps remain UTC for database compatibility.
 
 ### Database migration boundary
 
