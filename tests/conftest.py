@@ -21,6 +21,7 @@ from sqlalchemy.pool import StaticPool
 # Importing app.main registers every model on SQLModel.metadata and builds the
 # FastAPI app (routers, middleware) without running the lifespan handler.
 import app.db.database as database_module
+from app.core.time import business_today
 from app.core.config import settings
 from app.core.deps import get_session
 from app.db.models import BloodGroup, User
@@ -190,7 +191,7 @@ def fixture_ineligible_donor(session):
         longitude=90.4043,
         is_available=True,
         gender="Male",
-        last_donation_date=date.today() - timedelta(days=10),
+        last_donation_date=business_today() - timedelta(days=10),
     )
     session.add(user)
     session.commit()
@@ -277,7 +278,7 @@ def valid_request_payload(**overrides) -> dict:
         "hospital_address": "Bakshibazar, Dhaka",
         "latitude": 23.7261,
         "longitude": 90.3960,
-        "needed_date": str(date.today() + timedelta(days=1)),
+        "needed_date": str(business_today() + timedelta(days=1)),
         "contact_number": "+8801711111111",
         "notes": "Urgent, surgery scheduled",
     }

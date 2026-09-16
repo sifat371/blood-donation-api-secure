@@ -1,3 +1,5 @@
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +34,8 @@ class Settings(BaseSettings):
 
     # Environment
     environment: str = "development"
+    # Calendar-day business rules (request deadlines, donation cooldown dates).
+    business_timezone: str = "Asia/Dhaka"
 
     # ── Email/password accounts ──────────────────────────
     #
@@ -95,6 +99,11 @@ def validate_runtime_settings(current: Settings | None = None) -> None:
         problems.append("MAIL_BACKEND must be 'smtp' in production")
     if not (current.smtp_host or "").strip():
         problems.append("SMTP_HOST must be configured in production")
+
+    try:
+        ZoneInfo(current.business_timezone)
+    except ZoneInfoNotFoundError:
+        problems.append("BUSINESS_TIMEZONE must be a valid IANA timezone")
 
     if problems:
         raise RuntimeError("Invalid production configuration: " + "; ".join(problems))

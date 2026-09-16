@@ -11,6 +11,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from app.core.time import business_today
 from app.db.models import BloodGroup, User
 
 API = "/api/v1"
@@ -311,7 +312,7 @@ def test_each_caller_searches_from_the_position_they_supply(
     [(0, False), (1, False), (89, False), (90, True), (200, True)],
 )
 def test_the_ninety_day_boundary(recipient_client, session, donor_user, days_ago, expected):
-    donor_user.last_donation_date = date.today() - timedelta(days=days_ago)
+    donor_user.last_donation_date = business_today() - timedelta(days=days_ago)
     session.add(donor_user)
     session.commit()
 

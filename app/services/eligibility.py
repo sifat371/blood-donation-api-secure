@@ -9,6 +9,7 @@ from datetime import date
 from typing import Optional
 
 from app.db.models import User
+from app.core.time import business_today
 
 ELIGIBILITY_DAYS = 90
 
@@ -24,7 +25,7 @@ def is_eligible(user: User) -> bool:
 
 def days_since_last_donation(last_donation_date: date) -> int:
     """Days elapsed since the last donation."""
-    return (date.today() - last_donation_date).days
+    return (business_today() - last_donation_date).days
 
 
 def days_until_eligible(user: User) -> int:

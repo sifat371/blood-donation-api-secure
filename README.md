@@ -113,3 +113,18 @@ Donor acceptance is enforced server-side: the donor must have a complete donor
 profile, be available, satisfy the recorded 90-day donation interval, and have a
 red-cell-compatible blood group. Final medical eligibility and transfusion
 compatibility still require screening by qualified healthcare/blood-bank staff.
+
+### Time and request expiry
+
+Calendar-day rules use `BUSINESS_TIMEZONE` (default `Asia/Dhaka`). New requests
+may target today or a future date; overdue pending requests are marked `Expired`
+and are no longer shown to donors or eligible for acceptance. Stored application
+timestamps remain UTC for compatibility with the existing database schema.
+
+### Database migration boundary
+
+SQLite remains the supported local/test database. Engine options are now
+dialect-aware, and the legacy startup migration code runs only on SQLite. Before
+a production PostgreSQL deployment, follow `docs/database-migrations.md` and
+introduce a reviewed Alembic migration history rather than relying on `create_all`.
+

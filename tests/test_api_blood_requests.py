@@ -7,7 +7,8 @@ and the authorisation rules that keep two users' data separate.
 
 from datetime import date, datetime, timedelta
 
-from app.db.models import RequestStatus
+from app.db.models import BloodGroup, RequestStatus
+from app.core.time import business_today
 from tests.conftest import valid_request_payload
 
 
@@ -391,9 +392,7 @@ def test_completion_sets_donor_last_donation_date(recipient_client, donor_client
     recipient_client.post(f"/api/v1/blood-requests/{created['id']}/complete")
 
     donor = donor_client.get("/api/v1/profile/me").json()
-    # The server records dates in UTC (datetime.utcnow), which can differ from
-    # the test machine's local date around midnight.
-    assert donor["last_donation_date"] == str(datetime.utcnow().date())
+    assert donor["last_donation_date"] == str(business_today())
 
 
 # ── Cancel ───────────────────────────────────────────────
@@ -534,12 +533,73 @@ def test_nearby_rejects_impossible_coordinates(donor_client):
     assert r.status_code == 422
 
 
-def test_past_needed_date_is_still_accepted(recipient_client):
-    """Not a validation error today — asserted so a future change is deliberate."""
+def test_past_needed_date_is_rejected(recipient_client):
     r = recipient_client.post(
         "/api/v1/blood-requests",
         json=valid_request_payload(
-            needed_date=str(date.today() - timedelta(days=2))
+            needed_date=str(business_today() - timedelta(days=1))
         ),
     )
-    assert r.status_code == 201
+    assert r.status_code == 422
+
+
+def test_today_needed_date_is_accepted(recipient_client):
+    r = recipient_client.post(
+        "/api/v1/blood-requests",
+        json=valid_request_payload(needed_date=str(business_today())),
+    )
+    assert r.status_code == 201, r.text
+
+
+def test_stale_pending_request_is_expired_and_hidden(
+    donor_client, session, sample_user
+):
+    from app.db.models import BloodRequest
+
+    req = BloodRequest(
+        recipient_id=sample_user.id,
+        patient_name="Old request",
+        blood_group=BloodGroup.O_POS.value,
+        units=1,
+        hospital_name="Old Hospital",
+        latitude=23.75,
+        longitude=90.39,
+        needed_date=business_today() - timedelta(days=1),
+        contact_number="+8801700000999",
+        status=RequestStatus.PENDING.value,
+    )
+    session.add(req)
+    session.commit()
+    session.refresh(req)
+
+    response = donor_client.get(
+        "/api/v1/blood-requests/nearby",
+        params={"latitude": 23.79, "longitude": 90.40},
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
+    session.refresh(req)
+    assert req.status == RequestStatus.EXPIRED.value
+
+
+def test_expired_request_cannot_be_accepted(donor_client, session, sample_user):
+    from app.db.models import BloodRequest
+
+    req = BloodRequest(
+        recipient_id=sample_user.id,
+        patient_name="Old request",
+        blood_group=BloodGroup.O_POS.value,
+        units=1,
+        hospital_name="Old Hospital",
+        needed_date=business_today() - timedelta(days=1),
+        contact_number="+8801700000999",
+        status=RequestStatus.PENDING.value,
+    )
+    session.add(req)
+    session.commit()
+    session.refresh(req)
+
+    response = donor_client.post(f"/api/v1/blood-requests/{req.id}/accept")
+    assert response.status_code == 400
+    session.refresh(req)
+    assert req.status == RequestStatus.EXPIRED.value

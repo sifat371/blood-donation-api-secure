@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from jose import jwt
 
 from app.core.config import settings
+from app.core.time import utc_now
 from app.services.auth_service import create_refresh_token
 
 
@@ -40,7 +41,7 @@ def test_protected_endpoint_rejects_an_expired_token(client, sample_user):
     expired = jwt.encode(
         {
             "sub": str(sample_user.id),
-            "exp": datetime.utcnow() - timedelta(minutes=1),
+            "exp": utc_now() - timedelta(minutes=1),
             "type": "access",
         },
         settings.secret_key,
@@ -195,7 +196,7 @@ def test_refresh_rejects_an_expired_token(client, sample_user, session):
 
     raw = create_refresh_token(session, sample_user.id)
     stored = session.exec(select(RefreshToken)).first()
-    stored.expires_at = datetime.utcnow() - timedelta(days=1)
+    stored.expires_at = utc_now() - timedelta(days=1)
     session.add(stored)
     session.commit()
 
@@ -258,3 +259,35 @@ def test_google_login_rejects_an_invalid_id_token(client, monkeypatch):
     )
     r = client.post("/api/v1/auth/google", json={"id_token": "not-a-google-token"})
     assert r.status_code == 401
+
+
+def test_refresh_does_not_extend_an_unverified_account(client, sample_user, session):
+    from sqlmodel import select
+    from app.db.models import RefreshToken
+
+    raw = create_refresh_token(session, sample_user.id)
+    sample_user.email_verified = False
+    session.add(sample_user)
+    session.commit()
+
+    response = client.post("/api/v1/auth/refresh", json={"refresh_token": raw})
+    assert response.status_code == 401
+    tokens = session.exec(select(RefreshToken).where(RefreshToken.user_id == sample_user.id)).all()
+    assert tokens
+    assert all(token.revoked for token in tokens)
+
+
+def test_refresh_does_not_extend_a_deleted_account(client, sample_user, session):
+    from sqlmodel import select
+    from app.db.models import RefreshToken
+
+    user_id = sample_user.id
+    raw = create_refresh_token(session, user_id)
+    session.delete(sample_user)
+    session.commit()
+
+    response = client.post("/api/v1/auth/refresh", json={"refresh_token": raw})
+    assert response.status_code == 401
+    tokens = session.exec(select(RefreshToken).where(RefreshToken.user_id == user_id)).all()
+    assert tokens
+    assert all(token.revoked for token in tokens)

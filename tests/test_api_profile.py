@@ -10,6 +10,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from app.core.time import business_today
 from app.db.models import BloodGroup, FCMToken, User
 
 API = "/api/v1"
@@ -377,7 +378,7 @@ def test_donation_history_shows_only_your_own_donations(
         DonationHistory(
             donor_id=donor_user.id,
             blood_group=donor_user.blood_group,
-            date=date.today() - timedelta(days=5),
+            date=business_today() - timedelta(days=5),
             status="Completed",
             hospital_name="Square Hospital",
         )

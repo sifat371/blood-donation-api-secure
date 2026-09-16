@@ -3,9 +3,10 @@
 from datetime import date, datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.db.models import BloodGroup
+from app.core.time import business_today
 
 # ── Single source of truth for the units business rule ───
 #
@@ -39,6 +40,13 @@ class BloodRequestCreate(BaseModel):
     # Validated against the enum, stored as the plain "O+" string. The donor
     # fan-out matches blood_group by string equality, so an unchecked free-text
     # group would create a request no donor could ever be notified about.
+    @field_validator("needed_date")
+    @classmethod
+    def needed_date_cannot_be_in_the_past(cls, value: date) -> date:
+        if value < business_today():
+            raise ValueError("needed_date cannot be in the past")
+        return value
+
     model_config = {"use_enum_values": True}
 
 

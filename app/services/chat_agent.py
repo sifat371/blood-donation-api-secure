@@ -17,6 +17,7 @@ from typing import Optional, List, Tuple
 from sqlmodel import Session, select
 
 from app.core.config import settings
+from app.core.time import business_today
 from app.db.models import ConversationHistory, ConversationRole, User
 from app.mcp_tools.tools import dispatch_tool, TOOL_DEFINITIONS
 
@@ -69,7 +70,7 @@ def normalize_blood_group(text: str) -> Optional[str]:
 def parse_relative_date(text: str) -> Optional[str]:
     """Parse relative dates like 'today', 'tomorrow', 'next Monday'."""
     text_lower = text.strip().lower()
-    today = date.today()
+    today = business_today()
 
     if "today" in text_lower or "আজ" in text_lower:
         return today.isoformat()

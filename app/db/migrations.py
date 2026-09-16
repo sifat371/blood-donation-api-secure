@@ -104,7 +104,21 @@ def _run_users_email_verification(session: Session) -> Iterable[str]:
 
 
 def run_migrations() -> list[str]:
-    """Apply every pending additive migration. Safe to call on every startup."""
+    """Apply legacy additive migrations on SQLite only.
+
+    PostgreSQL and other production-grade databases must use versioned schema
+    migrations (Alembic). Skipping the SQLite PRAGMA path there is deliberate: a
+    DATABASE_URL change must never execute SQLite-specific SQL against another
+    dialect.
+    """
+    if engine.dialect.name != "sqlite":
+        logger.info(
+            "Skipping legacy SQLite migrations for database dialect %s; "
+            "use versioned migrations for schema changes",
+            engine.dialect.name,
+        )
+        return []
+
     applied: list[str] = []
     with Session(engine) as session:
         if "users" not in _tables(session):
