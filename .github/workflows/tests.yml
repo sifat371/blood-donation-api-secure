@@ -15,5 +15,32 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --frozen --dev
-      - run: uv run python -m compileall -q app tests scripts
+      - run: uv run python -m compileall -q app tests scripts alembic
       - run: uv run pytest -q
+
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: blood_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/blood_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --frozen --dev
+      - run: uv run alembic upgrade head
+      - run: uv run pytest -q tests/test_alembic_migrations.py tests/test_commitment_service.py tests/test_api_blood_requests.py
