@@ -6,342 +6,333 @@ Base: `main` at `2439d00d1cec1683493fde4cfe7fe5ded53236fb`
 
 ## 1. Purpose
 
-P3.1 replaces best-effort push notification delivery with a durable notification pipeline while preserving the existing in-app notification inbox and P2 request lifecycle semantics.
+P3.1 replaces best-effort push delivery with a durable notification pipeline while preserving the existing in-app inbox and the P2 request/commitment lifecycle.
 
-The phase has four goals:
+Goals:
 
-1. Ensure notification-generating business events survive API-process crashes.
-2. Ensure FCM delivery work survives worker/API restarts and transient provider failures.
-3. Support multiple active devices per user without one registration silently replacing another.
-4. Make delivery observable, retryable, idempotent, and safe under multiple PostgreSQL worker instances.
+1. Notification-generating business events must survive API-process crashes.
+2. FCM delivery work must survive API/worker restarts and transient provider failures.
+3. One user may have multiple active app installations without one registration replacing another.
+4. Delivery must be observable, retryable, idempotent, and safe under multiple PostgreSQL workers.
 
-P3.1 adds no Redis, Celery, Kafka, or external queue. PostgreSQL is the production coordination mechanism. SQLite remains supported for local development/tests with a single notification worker only.
+P3.1 adds no Redis, Celery, Kafka, or other queue service. PostgreSQL is the production coordination mechanism. SQLite remains supported for local development/tests with a single notification worker only.
 
 ## 2. Current-state problems
 
-The current implementation already persists `Notification` rows, but FCM sending is best-effort after the surrounding business transaction commits. A crash between commit and the FCM send permanently loses the push attempt even though the in-app notification exists.
+The current app stores `Notification` rows durably, but FCM is sent best-effort after the business transaction commits. A crash between commit and send can permanently lose the push attempt.
 
-Blood-request creation has a second durability gap: it commits the request and then schedules donor fan-out using FastAPI `BackgroundTasks`. If the process dies after the request commit but before or during that background task, the request survives but donor notifications may never be generated.
+Blood-request creation has a second gap: the request is committed and donor fan-out is then scheduled with FastAPI `BackgroundTasks`. If the process dies after commit, the request can survive while donor notifications are never generated.
 
-FCM registration also effectively behaves as one token per user because `/profile/fcm-token` updates the first row found for that user. That does not model multiple installations and does not safely handle token rotation.
+FCM registration also effectively behaves as one device per user because `/profile/fcm-token` updates the first token row for that user. It does not model multiple installations or token rotation safely.
 
 ## 3. Scope
 
 ### In scope
 
-- Transactional database outbox for recoverable domain notification work.
-- Durable per-device push-delivery queue.
-- Multi-device FCM installation model.
-- Stable client-provided `device_id` per installation.
-- Device registration, token rotation, safe token re-ownership, and unregister.
-- Per-device delivery status, attempts, provider result, and failure classification.
-- Exponential retry with jitter and dead-letter state.
-- Permanent invalid-token retirement.
-- Stable notification `event_id` in API and push payloads.
+- Transactional DB outbox for recoverable notification-domain work.
+- Durable per-device push queue.
+- Multi-device installation model.
+- Stable client-provided `device_id`.
+- Registration, token rotation, token ownership transfer, unregister, and invalid-token retirement.
+- Per-device status, attempts, provider result, failure classification, retry, and dead-letter state.
+- Stable notification `event_id` for client deduplication.
 - Durable donor fan-out for newly created blood requests.
-- Dedicated Python notification worker process.
-- PostgreSQL-safe concurrent claiming with `FOR UPDATE SKIP LOCKED`.
-- Stale-lock reclamation after worker crashes.
-- SQLite single-worker fallback for local/test use.
+- Dedicated Python notification worker.
+- PostgreSQL `FOR UPDATE SKIP LOCKED` claiming and stale-lock reclamation.
+- SQLite single-worker fallback.
 - Data-preserving Alembic migration.
-- Regression coverage for existing notification privacy, lifecycle, and deep-link behavior.
+- Regression coverage for notification privacy, deep links, request lifecycle, and P2 donor-selection rules.
 
 ### Out of scope
 
 - Redis/Celery/Kafka.
-- WebSockets or realtime inbox streaming.
-- Email/SMS notification channels.
-- Push preference controls by notification type.
-- Auth-session/device-session coupling; that belongs to P3.2.
-- Chat/AI rate limiting or action confirmation; that belongs to P3.3.
-- Trust/moderation systems; that belongs to P3.4.
-- Retrofactive push attempts for historical notifications.
+- WebSockets/realtime inbox streaming.
+- Email/SMS channels.
+- Per-type notification preferences.
+- Auth-session/device-session coupling (P3.2).
+- AI/chat rate limiting and action confirmation (P3.3).
+- Trust/moderation (P3.4).
+- Retrospective push attempts for historical notifications.
 
 ## 4. Approved architecture
 
 P3.1 uses two durable queue-like structures with separate responsibilities:
 
-1. `outbox_events`: durable domain work where notification recipients are not yet materialized, initially blood-request donor fan-out.
-2. `notification_deliveries`: one durable push-delivery job per notification and device installation.
+1. `outbox_events` — recoverable domain work where notification recipients are not materialized yet, initially blood-request donor fan-out.
+2. `notification_deliveries` — one durable FCM job per notification/device installation.
 
-`Notification` remains the user-facing in-app inbox and source of truth for notification content. Queue rows are operational state, not business truth.
+`Notification` remains the user-facing in-app inbox and the source of truth for notification content. Queue rows are operational state, not business truth.
 
 The API never waits for FCM and never makes business success depend on provider availability.
 
-## 5. Data model
+## 5. Alembic revision and data model
 
-Alembic revision: `0003_notification_outbox`.
+Create revision `0003_notification_outbox`.
 
 ### 5.1 `notifications`
 
-Keep the existing numeric primary key and fields. Add:
+Keep the existing primary key and fields. Add:
 
-- `event_id`: stable UUID-style string, non-null and unique.
+- `event_id`: non-null, unique UUID-style string.
+- `dedupe_key`: nullable, unique string used when a producer has a deterministic business identity for a notification.
 
 Rules:
 
-- Direct lifecycle notifications receive a random UUID-style `event_id` at creation time.
-- Notifications materialized from a durable fan-out event use a deterministic UUID-style `event_id`, derived from the outbox event idempotency key plus recipient user id and notification type. Reprocessing the same fan-out therefore addresses the same notification identity instead of creating another inbox row.
-- Existing rows are backfilled during migration with unique generated values.
-- `event_id` is returned by the notification API and included in every FCM payload.
-- Client deduplication uses `event_id`, while numeric `id` remains the server-side/API identifier.
+- Every new notification gets an `event_id` at creation time.
+- Existing rows are backfilled with unique generated `event_id` values.
+- `event_id` is returned by the API and included in every push payload.
+- Fan-out notifications use deterministic `dedupe_key` values so replay cannot create a second inbox row for the same request/donor event.
+- Direct lifecycle notifications may also use deterministic keys when a natural business key exists, but `dedupe_key` remains optional.
+
+Initial fan-out key format:
+
+`blood_request_created:<request_id>:donor:<user_id>`
 
 ### 5.2 `fcm_tokens`
 
-Evolve the table from token storage into installation records while retaining its existing table name for compatibility.
+Evolve the table into installation records.
 
-Fields:
+Existing fields retained: `id`, `user_id`, `token`, `device_info`, `created_at`.
 
-- existing: `id`, `user_id`, `device_info`, `created_at`
-- change: `token` becomes nullable so an inactive installation can retain its identity after token ownership is removed
-- add: `device_id` (non-null)
-- add: `is_active` (bool, default true)
-- add: `last_seen_at`
-- add: `updated_at`
-- add: `disabled_at` nullable
-- add: `last_failure_reason` nullable
+Changes/additions:
+
+- `token` becomes nullable so an old installation can be retained as historical/auditable after its token moves elsewhere.
+- `device_id`: non-null stable installation identifier.
+- `is_active`: bool, default true.
+- `last_seen_at`.
+- `updated_at`.
+- `disabled_at` nullable.
+- `last_failure_reason` nullable.
 
 Constraints:
 
-- unique `(user_id, device_id)`
-- unique `token`; both PostgreSQL and SQLite permit multiple `NULL` values under a normal unique constraint
-- check: an active installation must have a non-null token
-- indexed `user_id`
-- indexed active-state lookup as appropriate for supported dialects
+- unique `(user_id, device_id)`.
+- unique `token` for non-null tokens (ordinary unique semantics are sufficient because PostgreSQL and SQLite permit multiple `NULL`s).
+- indexed `user_id` and active-device lookup.
 
-Migration of existing rows:
+Legacy migration:
 
 - Preserve every existing row.
-- Assign a deterministic legacy `device_id` derived from the row identity, for example `legacy-<id>`.
-- Mark migrated rows active.
-- Preserve their current tokens.
-- Do not merge or delete legacy rows during migration.
+- Assign deterministic IDs such as `legacy-<row_id>`.
+- Mark legacy rows active.
+- Keep existing non-null token values.
 
 ### 5.3 `outbox_events`
 
-Purpose: recoverable domain notification work.
-
 Fields:
 
-- `id`
-- `event_type`
-- `aggregate_type`
-- `aggregate_id`
-- `payload_json`
-- `idempotency_key` unique
-- `status`: `Pending`, `Processing`, `Completed`, `Dead`
-- `attempts`
-- `available_at`
-- `locked_at` nullable
-- `locked_by` nullable
-- `last_error` nullable
-- `created_at`
-- `updated_at`
-- `completed_at` nullable
+- `id`.
+- `event_type`.
+- `aggregate_type`.
+- `aggregate_id`.
+- `payload_json`.
+- `idempotency_key` unique.
+- `status`: `Pending`, `Processing`, `Completed`, `Dead`.
+- `attempts`.
+- `available_at`.
+- `locked_at` nullable.
+- `locked_by` nullable.
+- `last_error` nullable.
+- `created_at`.
+- `updated_at`.
+- `completed_at` nullable.
 
-Initial event type:
+Initial event:
 
-- `blood_request_created`
+- `blood_request_created`.
 
-Idempotency key:
+Initial idempotency key:
 
-- one stable key per request-creation fan-out, `blood_request_created:<request_id>`.
+`blood_request_created:<request_id>`
 
 ### 5.4 `notification_deliveries`
 
-Purpose: durable push job plus delivery audit for one notification/device pair.
-
 Fields:
 
-- `id`
-- `notification_id` FK
-- `fcm_token_id` FK
-- `status`: `Pending`, `Processing`, `Delivered`, `Retry`, `Dead`, `Skipped`
-- `attempts`
-- `available_at`
-- `locked_at` nullable
-- `locked_by` nullable
-- `provider_message_id` nullable
-- `last_error` nullable
-- `last_error_category` nullable
-- `delivered_at` nullable
-- `created_at`
-- `updated_at`
+- `id`.
+- `notification_id` FK.
+- `fcm_token_id` FK to the installation row.
+- `status`: `Pending`, `Processing`, `Delivered`, `Retry`, `Dead`, `Skipped`.
+- `attempts`.
+- `available_at`.
+- `locked_at` nullable.
+- `locked_by` nullable.
+- `provider_message_id` nullable.
+- `last_error` nullable.
+- `last_error_category` nullable.
+- `delivered_at` nullable.
+- `created_at`.
+- `updated_at`.
 
 Constraint:
 
-- unique `(notification_id, fcm_token_id)`
+- unique `(notification_id, fcm_token_id)`.
 
-The device row keeps its stable user/device identity even when its token is removed. This preserves the meaning of historical delivery rows.
+A delivery references an installation identity, not a free-form token string. Token rotation on the same installation may therefore allow a pending delivery to use the installation's current token, but only when the installation is still active and still belongs to the same user as the notification.
 
-Immediately before sending, the delivery processor must verify all of the following:
+## 6. Critical ownership-safety invariant
 
-- installation is active;
-- installation token is non-null;
-- installation `user_id` equals the owning notification `user_id`.
+A pending delivery must never follow an FCM token into another user's account.
 
-If any check fails, the delivery is terminally `Skipped` and no provider call occurs. This is defense in depth against cross-account token leakage.
+Device registration therefore follows these rules:
 
-## 6. Delivery semantics
+1. `(authenticated_user_id, device_id)` is the stable installation identity.
+2. If the same installation rotates its token, update that installation row.
+3. If a submitted token currently belongs to a different installation/user, do **not** simply change ownership of that existing row while leaving old jobs attached.
+4. Instead, in one transaction:
+   - mark the old installation inactive;
+   - set its token to `NULL` and record the reason/time;
+   - mark its unresolved (`Pending`, `Retry`, stale `Processing`) delivery rows `Skipped`;
+   - attach the token to the authenticated user's target installation, creating or reactivating that installation as needed.
+5. Before every send, the delivery processor must verify:
+   - installation exists;
+   - installation is active;
+   - installation token is non-null;
+   - `installation.user_id == notification.user_id`.
+   If any check fails, mark the delivery `Skipped` and do not call FCM.
+
+This invariant prevents cross-account delivery even if a token is reassigned between notification creation and worker processing.
+
+## 7. Delivery semantics
 
 P3.1 provides at-least-once delivery semantics, not exactly-once delivery.
 
-True exactly-once FCM delivery cannot be guaranteed because a provider timeout can happen after FCM accepts a message but before the worker receives the acknowledgement.
+Exactly-once cannot be guaranteed end-to-end because a provider timeout can occur after FCM accepts a message but before the worker receives the acknowledgement.
 
 Mitigations:
 
-- stable `event_id` and `notification_id` in push payloads;
+- stable `event_id` and numeric `notification_id` in every push payload;
 - unique notification/device delivery rows;
-- delivered device rows are never intentionally resent;
-- retries target unresolved delivery rows only;
+- delivered rows are not intentionally resent;
+- retries target unresolved rows only;
 - clients can suppress duplicate presentation using `event_id`.
 
-## 7. Business write paths
+## 8. Business write paths
 
-### 7.1 Direct lifecycle notifications
+### 8.1 Direct lifecycle notifications
 
 Examples:
 
-- donor commits to request -> notify recipient;
-- recipient confirms donation -> notify donor;
-- request cancellation -> notify affected committed donors.
+- donor commits -> recipient notification;
+- recipient confirms donation -> donor notification;
+- request cancellation -> affected donor notifications.
 
-The existing business transaction must atomically persist:
+The existing business transaction atomically persists:
 
-- the business state change;
+- business state change;
 - audit rows;
-- the in-app `Notification` row;
+- `Notification` row;
 - one `NotificationDelivery` row for every currently active installation belonging to the recipient.
-
-If the transaction rolls back, none of those notification/delivery rows remain.
 
 No network call occurs before or during commit.
 
-If the user has no active device, the in-app notification is still created. Registering a device later does not create delivery rows for old notifications.
+If the transaction rolls back, none of the notification/delivery rows remain.
 
-### 7.2 Blood-request donor fan-out
+If the user has no active device, the in-app notification still exists. Registering a device later does not retroactively enqueue old notifications.
 
-Request creation must atomically persist:
+### 8.2 Blood-request donor fan-out
+
+Request creation atomically persists:
 
 - `BloodRequest`;
-- its audit row;
+- audit row;
 - `OutboxEvent(event_type='blood_request_created')`.
 
-The request endpoint no longer depends on FastAPI `BackgroundTasks` for donor fan-out.
+The endpoint no longer depends on FastAPI `BackgroundTasks` for donor fan-out.
 
 The worker later processes the event by:
 
-1. claiming the due outbox row;
-2. opening a processing transaction;
-3. loading the request and re-checking that it is still an open-capacity request;
-4. applying the same P2 compatibility, availability, eligibility, location-radius, and maximum-recipient rules;
-5. selecting recipients deterministically;
-6. creating or resolving each recipient's deterministic `Notification.event_id` and current active-device `NotificationDelivery` rows;
-7. marking the outbox event `Completed` in the same database transaction as notification/delivery materialization;
-8. committing once.
-
-If that transaction fails, neither materialization nor `Completed` state commits. The event remains reclaimable after its processing lease expires.
+1. loading the request;
+2. verifying the event is still relevant and the request still has open capacity;
+3. applying the same P2 RBC compatibility, eligibility, availability, radius, and recipient-cap rules;
+4. selecting recipients deterministically (same sort/ranking rule for every replay);
+5. creating each donor's `Notification` with deterministic `dedupe_key`;
+6. creating current active-device delivery rows for each newly created or already-existing deduped notification as appropriate;
+7. marking the outbox event `Completed` in the **same transaction** that materializes the notification state.
 
 Reprocessing is harmless because:
 
-- the outbox `idempotency_key` is unique;
-- fan-out notification `event_id` values are deterministic;
-- `Notification.event_id` is unique;
-- `(notification_id, fcm_token_id)` delivery pairs are unique.
+- the outbox event has a unique idempotency key;
+- donor inbox notifications have deterministic unique `dedupe_key` values;
+- delivery rows have unique `(notification_id, fcm_token_id)` constraints;
+- event completion and notification materialization commit together.
 
-No duplicate donor inbox notification or duplicate device job may be created by replay.
-
-## 8. Worker design
+## 9. Worker design
 
 Run a separate Python process, for example:
 
 `uv run python -m app.workers.notification_worker`
 
-The worker performs two loops/batches:
+The worker performs two independent batches:
 
 1. claim/process due `outbox_events`;
 2. claim/send due `notification_deliveries`.
 
 ### PostgreSQL claiming
 
-Use short transactions and `SELECT ... FOR UPDATE SKIP LOCKED` for due rows.
+Use short transactions and `SELECT ... FOR UPDATE SKIP LOCKED`.
 
-When a row is claimed:
+Claim operation:
 
-- move status to `Processing`;
+- select due rows;
+- set `Processing`;
 - set `locked_at`;
 - set `locked_by` to a worker instance identifier;
-- commit the claim quickly before later processing/external work.
+- commit the claim quickly before external/network work.
 
-Multiple workers can therefore operate concurrently without intentionally processing the same claimed row at the same time.
+Multiple workers can run concurrently without intentionally claiming the same row.
 
-For outbox events, the later materialization transaction also changes the claimed event to `Completed` atomically with generated notification rows.
+### SQLite
 
-For delivery rows, the external provider call necessarily sits outside an atomic database/provider transaction; this is why delivery semantics are at-least-once.
-
-### SQLite behavior
-
-SQLite remains valid for local development and the ordinary test suite but supports one notification worker only. Horizontal worker safety is a PostgreSQL production property and receives dedicated PostgreSQL integration tests.
+SQLite is supported for development and ordinary tests with one worker only. Horizontal claim semantics are a PostgreSQL production property and receive PostgreSQL integration tests.
 
 ### Stale lock reclamation
 
-`Processing` rows with `locked_at` older than a configured lease become reclaimable. Reclamation clears/replaces lock ownership and prevents crashed workers from stranding work indefinitely.
+`Processing` rows whose `locked_at` is older than the configured lease become reclaimable. Reclamation must not strand jobs or reset attempt accounting incorrectly.
 
-Attempt accounting distinguishes an actual provider send attempt from merely reclaiming a stale lock. A reclaimed row does not consume an extra FCM attempt until another provider call is made.
+## 10. Retry and terminal-state policy
 
-## 9. Retry and terminal-state policy
+Default transient-failure schedule:
 
-Default retry sequence after transient FCM failures:
+- about 1 minute;
+- about 5 minutes;
+- about 30 minutes;
+- about 2 hours;
+- about 12 hours.
 
-- ~1 minute
-- ~5 minutes
-- ~30 minutes
-- ~2 hours
-- ~12 hours
+After the fifth failed attempt, move the delivery to `Dead`.
 
-After the fifth actual provider failure, move the delivery to `Dead`.
+The retry schedule, max attempts, poll interval, batch size, and lease duration are configuration values. Retry timing adds bounded jitter to avoid synchronized retry spikes.
 
-The schedule, poll interval, batch size, lease duration, and maximum attempts are configuration values rather than business constants.
+Failure classes:
 
-Add bounded jitter to retry timing so provider recovery does not cause synchronized retry spikes.
+### Permanent invalid/unregistered token
 
-Outbox-event processing also uses bounded retries for transient database/application failures. Deterministic malformed/unsupported outbox payloads become `Dead` rather than looping forever.
-
-### Failure classification
-
-#### Permanent token/provider rejection
-
-Examples include unregistered/invalid device tokens.
-
-Action in one database transaction:
-
-- mark installation inactive;
-- clear its token;
-- set `disabled_at` and failure reason;
+- deactivate installation;
+- clear/make token unusable as appropriate;
+- record disable time/reason;
 - mark current delivery terminal `Skipped`;
-- mark any still-pending/retry deliveries for that installation `Skipped`.
+- mark all unresolved delivery rows for that installation `Skipped`.
 
-#### Transient provider/network failure
+### Transient provider/network failure
 
-Action:
+- increment attempts;
+- set `Retry`;
+- compute future `available_at` from configured backoff plus jitter.
 
-- increment provider-attempt count;
-- set status `Retry`;
-- compute next `available_at` using configured backoff plus jitter.
+### Malformed/internal payload error
 
-#### Malformed/internal payload error
+If retry cannot plausibly fix the problem, move to `Dead` immediately or after a very small bounded retry count.
 
-If retry cannot plausibly fix the error, move the row to `Dead` immediately or after a very small bounded retry count. Do not retry malformed application data for hours.
+### Firebase unavailable/misconfigured
 
-#### Firebase unavailable or locally misconfigured
+Business/API actions still succeed. Delivery rows remain unresolved/retryable rather than disappearing.
 
-Business/API actions remain successful. The worker defers due deliveries with an infrastructure-unavailable retry delay and logs the condition. This deferral does not consume the normal per-message FCM attempt budget, because no provider send was attempted. Work therefore remains recoverable after credentials/configuration are repaired instead of being silently discarded or dead-lettered solely due to deployment configuration.
+## 11. Device API contract
 
-## 10. Device API contract
+### Register/update
 
-### Register/update installation
-
-Keep endpoint path:
+Keep:
 
 `POST /api/v1/profile/fcm-token`
 
@@ -355,20 +346,17 @@ New request body:
 }
 ```
 
-`device_id` is required in P3.1. This is an intentional API contract change.
+`device_id` is required. This is the only intentional client-facing breaking change in P3.1.
 
-`device_id` is an opaque installation identifier generated and persisted by the client. The API validates a bounded URL-safe representation; a client-generated UUID is the recommended format.
+Registration behavior:
 
-Behavior in one transaction:
+- identify target by `(authenticated user, device_id)`;
+- create, update, or reactivate only that installation;
+- refresh `last_seen_at` and `updated_at`;
+- safely handle token reassignment using the ownership-safety invariant above;
+- never leave a token simultaneously usable by two installation rows.
 
-- `(authenticated user, device_id)` identifies one installation;
-- re-registering the same installation updates its token and metadata;
-- registration marks it active and refreshes `last_seen_at`/`updated_at`;
-- if the supplied FCM token is currently attached to another installation, the old installation is deactivated, its token is cleared, and its unresolved delivery rows are marked `Skipped` before the token is assigned to the caller's installation;
-- the old installation row itself is never reassigned to a different user/device identity;
-- token rotation therefore cannot make an old pending notification follow a token into another account.
-
-### Unregister installation
+### Unregister
 
 Add:
 
@@ -376,198 +364,173 @@ Add:
 
 Behavior:
 
-- only affects the authenticated user's matching installation;
-- marks it inactive, clears its token, and records disable/update time;
-- pending/retry delivery rows for that installation become `Skipped`;
-- already delivered history remains unchanged;
-- use 404 semantics for a missing/non-owned installation rather than leaking another user's device identity.
+- only affects the authenticated user's installation;
+- mark inactive and clear the usable token;
+- record disable/update time;
+- mark unresolved deliveries for that installation `Skipped`;
+- preserve already-delivered history;
+- return 404 for missing/non-owned device IDs rather than confirming another user's installation exists.
 
-A delivery already inside the external FCM call when unregister commits cannot be recalled; unregister prevents later provider calls after the worker observes the committed inactive state.
+Global logout-all-devices belongs to P3.2.
 
-A global logout-all-devices feature is deferred to P3.2.
+## 12. Notification API compatibility
 
-## 11. Notification API compatibility
+Existing list/read endpoints and ownership/privacy behavior remain unchanged.
 
-Keep existing notification list/read behavior and ownership/privacy guarantees.
+`NotificationResponse` adds `event_id`.
 
-`NotificationResponse` gains `event_id`.
+Existing numeric `id`, JSON-string `data`, `is_read`, and `created_at` remain.
 
-Existing fields remain, including numeric `id`, JSON-string `data`, `is_read`, and `created_at`.
+Every FCM payload includes at least:
 
-Every FCM payload includes at minimum:
+- `notification_id`;
+- `event_id`;
+- notification `type`;
+- existing deep-link data such as `request_id`/`commitment_id` when present.
 
-- `notification_id`
-- `event_id`
-- notification `type`
-- existing deep-link payload fields such as `request_id` and `commitment_id` where present
+## 13. Service boundaries
 
-## 12. Service boundaries
+Keep responsibilities isolated:
 
-P3.1 should keep responsibilities small and testable.
+- notification creation service — creates inbox notification and snapshots active-device delivery rows inside a caller-owned transaction;
+- outbox service — enqueues idempotent domain work;
+- device service — registration, rotation, reassignment, unregister, invalidation;
+- outbox processor — materializes supported outbox events into notifications/deliveries;
+- delivery processor — claims and sends per-device FCM jobs;
+- worker entry point — polling/orchestration only.
 
-Suggested boundaries:
+Request/commitment services call these abstractions and do not know worker internals.
 
-- notification creation service: creates in-app notification and snapshots active-device delivery rows inside caller-owned transactions;
-- outbox service: enqueues idempotent domain work;
-- device service: registration, token rotation, unregister, invalidation;
-- outbox processor: converts supported outbox events into inbox notifications/deliveries;
-- delivery processor: claims and sends per-device FCM jobs;
-- worker entry point: polling/loop orchestration only.
+## 14. Configuration and observability
 
-Business request/commitment services should call these abstractions rather than knowing worker internals.
-
-The old direct `send_notification_push` post-commit pattern is removed from normal business flows once the durable delivery processor is active.
-
-## 13. Configuration
-
-Add explicit settings for:
+Add settings for:
 
 - worker poll interval;
 - batch size;
 - claim lease duration;
-- maximum delivery attempts;
-- retry schedule/backoff parameters;
-- infrastructure-unavailable retry delay;
-- outbox maximum attempts;
-- optional worker identifier override for diagnostics.
+- maximum attempts;
+- retry schedule/backoff;
+- optional worker identifier override.
 
-Production configuration continues to allow the API process to accept business actions when FCM is unavailable. The worker makes unavailable/misconfigured FCM visible operationally while preserving queued work.
+Worker logs expose at least:
 
-## 14. Observability
-
-Worker logs should be structured enough to expose at least:
-
-- outbox rows claimed/completed/retried/dead;
-- deliveries claimed/delivered/retried/dead/skipped;
+- outbox claimed/completed/retried/dead;
+- delivery claimed/delivered/retried/dead/skipped;
 - invalid device tokens disabled;
 - stale locks reclaimed;
-- infrastructure-unavailable deferrals;
-- batch processing duration and failures.
+- batch duration/failure summaries.
 
-Do not log raw FCM tokens, auth secrets, patient-sensitive notification payloads, phone numbers, or exact coordinates.
+Never log raw FCM tokens, auth secrets, patient-sensitive payloads, phone numbers, or exact coordinates.
 
-P3.1 does not require a metrics backend; logs and database state are sufficient for this phase.
+P3.1 does not require a metrics backend.
 
 ## 15. Migration behavior
 
-Migration must be data-preserving.
+Migration is data-preserving:
 
-- Keep all existing `Notification` rows; backfill unique `event_id` values.
-- Keep all existing FCM token rows; assign deterministic legacy `device_id` values.
-- Keep existing tokens attached to those migrated active installations.
-- Do not fabricate historical `notification_deliveries`, because historical provider-delivery state is unknown.
-- New delivery tracking starts after the migration is deployed.
-- Existing request/donation/history data is untouched.
-- Startup remains read-only with respect to schema and must continue to fail if Alembic is not at head.
+- keep all `Notification` rows and backfill unique `event_id` values;
+- keep all existing FCM rows and assign deterministic legacy `device_id` values;
+- do not fabricate historical delivery rows because historical provider state is unknown;
+- new delivery tracking begins after migration;
+- do not modify existing blood-request, commitment, or donation-history data;
+- startup remains schema-read-only and still fails unless Alembic is at head.
 
-Downgrade behavior may refuse where removing durable delivery/outbox history or collapsing multi-device state would be lossy. Any refusal must be explicit in the Alembic revision.
+Downgrade may explicitly refuse if removing outbox/delivery/device-history state cannot be represented losslessly.
 
-## 16. Testing strategy
+## 16. Test strategy
 
 ### Migration/model tests
 
-- upgrade from `0002_multi_donor` to `0003_notification_outbox`;
-- preserve legacy FCM rows and tokens;
-- backfill valid unique device IDs and notification event IDs;
-- enforce `(user_id, device_id)` uniqueness;
-- enforce non-null token for active installations;
-- enforce token uniqueness for non-null values;
-- enforce `(notification_id, fcm_token_id)` uniqueness;
-- validate expected indexes/FKs/status constraints where applicable.
+- `0002_multi_donor -> 0003_notification_outbox` upgrade;
+- legacy FCM rows preserved;
+- unique legacy device IDs generated;
+- notification `event_id` backfill unique/non-null;
+- `(user_id, device_id)` uniqueness;
+- non-null token uniqueness;
+- `dedupe_key` uniqueness;
+- `(notification_id, fcm_token_id)` uniqueness;
+- required FKs/indexes/status constraints.
 
 ### Device API tests
 
 - `device_id` required;
-- two devices can coexist for one user;
-- same-device token rotation updates one installation only;
-- token transfer deactivates/clears the old installation before reassignment;
-- token transfer skips unresolved jobs for the old installation;
-- pending old-user notification cannot be sent after token ownership moves;
-- unregister affects only caller-owned device;
-- unregister skips unresolved jobs but preserves delivered audit rows;
-- registration reactivates an inactive installation safely.
+- two devices coexist for one user;
+- same-device token rotation updates only that installation;
+- token reassignment to another authenticated account disables/tombstones the old installation first;
+- old unresolved deliveries cannot follow a reassigned token;
+- unregister is caller-scoped and privacy-safe;
+- unregister skips unresolved jobs but preserves delivered audit history;
+- inactive installation can be safely reactivated.
 
-### Transactional notification tests
+### Transaction tests
 
 - business rollback removes notification and delivery rows;
-- successful lifecycle action creates notification plus delivery rows for all active devices;
+- successful lifecycle action creates one inbox notification and jobs for all active devices;
 - zero-device user still receives inbox notification;
 - inactive devices receive no new jobs.
 
 ### Fan-out/idempotency tests
 
-- request creation writes an outbox event in the same transaction;
-- no FastAPI `BackgroundTasks` dependency remains for donor fan-out;
-- replaying `blood_request_created` resolves the same deterministic notification event IDs;
-- replaying cannot duplicate inbox notifications;
-- replaying cannot duplicate notification/device delivery rows;
-- materialized notifications and outbox `Completed` state commit atomically;
-- fan-out re-checks current request state and no-ops/completes safely if no longer relevant;
-- fan-out continues to use P2 RBC compatibility, eligibility, availability, radius, and recipient cap rules.
+- request creation writes outbox event in same transaction;
+- no FastAPI `BackgroundTasks` donor-fan-out dependency remains;
+- repeated/reclaimed `blood_request_created` processing cannot duplicate inbox notifications;
+- repeated processing cannot duplicate per-device delivery rows;
+- event completion and notification materialization commit atomically;
+- stale/cancelled/full request no-ops appropriately;
+- P2 compatibility/eligibility/availability/radius/cap behavior remains unchanged.
 
 ### Delivery worker tests
 
-- successful provider response -> `Delivered` with provider message ID;
+- provider success -> `Delivered` with provider message ID;
 - transient failure -> `Retry` with future `available_at`;
-- max-attempt failure -> `Dead`;
-- invalid token -> installation inactive/token cleared and related unresolved jobs skipped;
-- inactive/mismatched device ownership -> `Skipped` without provider call;
-- malformed payload -> dead-letter behavior;
-- Firebase unavailable/misconfigured defers without consuming provider attempt budget;
-- API/business transaction success is independent of Firebase availability;
-- stale `Processing` jobs become reclaimable;
-- stale-lock reclamation alone does not consume a provider attempt;
-- already delivered jobs are not intentionally resent.
+- fifth failed attempt -> `Dead`;
+- invalid token -> installation disabled and unresolved jobs skipped;
+- malformed payload -> bounded dead-letter behavior;
+- Firebase unavailable does not affect business API success;
+- ownership mismatch causes `Skipped` without an FCM call;
+- stale lock is reclaimable.
 
 ### PostgreSQL concurrency tests
 
-Using PostgreSQL 16 CI:
-
-- two workers claim from the same due batch concurrently;
-- `SKIP LOCKED` prevents simultaneous ownership of one job;
-- stale lease reclamation works after simulated crash;
-- uniqueness constraints prevent duplicate fan-out/delivery materialization under concurrent/replayed processing.
+- two workers racing on the same due batch do not claim the same row simultaneously;
+- outbox fan-out remains idempotent under crash/reclaim/retry;
+- delivery rows remain single-claim per lease;
+- migration and worker queries run on PostgreSQL 16 CI.
 
 ### Regression tests
 
-Preserve all current notification tests covering:
+Preserve current behavior for:
 
-- auth required;
-- owner-only visibility;
-- 404 isolation for another user's notification;
-- read/unread behavior;
-- pagination;
-- deep-link request IDs;
-- accept/confirm/cancel lifecycle alerts;
-- push/provider failures never roll back completed business actions.
+- notification ownership isolation;
+- read/unread filtering;
+- deep-link payloads;
+- accept/confirm/cancel notifications;
+- business success despite push-provider failure;
+- full existing SQLite test suite;
+- PostgreSQL migration/integration suite.
 
-## 17. Rollout sequence
+## 17. Deployment sequence
 
-1. Add migration/models and schemas.
-2. Add device registration/unregister service and API behavior.
-3. Add transactional notification creation with delivery materialization.
-4. Add outbox enqueueing and durable blood-request fan-out.
-5. Add delivery/outbox processors and worker entry point.
-6. Remove direct post-commit FCM send paths and request `BackgroundTasks` fan-out.
-7. Add configuration/docs/operations notes.
-8. Add PostgreSQL concurrency coverage and full regression run.
+1. Deploy code and run `alembic upgrade head` to `0003_notification_outbox`.
+2. Start/update FastAPI instances.
+3. Start at least one dedicated notification worker.
+4. Confirm worker can claim due rows and Firebase configuration is available where push delivery is expected.
+5. Scale worker replicas only on PostgreSQL; SQLite remains single-worker local/test only.
 
-The API and worker must be deployable from the same code revision. Apply Alembic migration before starting either process.
+The API remains functional if the worker is temporarily down; outbox and delivery rows accumulate durably and resume when a worker returns.
 
 ## 18. Acceptance criteria
 
-P3.1 is complete when all of the following are true:
+P3.1 is complete only when all of the following are demonstrated by tests/CI:
 
-- A committed notification-generating business action cannot lose its push job because the API process crashes after commit.
-- A committed blood request cannot lose donor fan-out because the API process crashes after request creation.
-- One user can maintain multiple active device installations.
-- FCM token rotation updates the intended installation without silently replacing another device.
-- Moving a token to another account cannot cause an old pending notification to leak to the new owner.
-- Invalid tokens are retired without breaking business APIs.
-- Transient failures retry with bounded exponential backoff and eventually dead-letter.
-- FCM configuration outages defer work without consuming normal per-message failure budget.
-- Delivery state is auditable per device.
-- Multiple PostgreSQL workers can safely process queue rows concurrently.
-- SQLite remains usable for local/test operation with one worker.
-- Existing in-app notification privacy and lifecycle behavior remains intact.
-- The full SQLite suite and dedicated PostgreSQL P3.1 suite pass in GitHub Actions.
+1. Creating a blood request cannot lose donor fan-out because of an API crash after commit.
+2. Direct lifecycle notification creation is atomic with its business transaction.
+3. FCM delivery jobs survive process restart and transient failure.
+4. One user can register multiple installations independently.
+5. A reassigned FCM token can never deliver an old user's pending notification to the new owner.
+6. Invalid tokens are retired without failing business actions.
+7. Retries use bounded backoff and end in a visible terminal state.
+8. Replayed outbox work cannot duplicate inbox notifications or device delivery rows.
+9. Multiple PostgreSQL workers can claim work safely.
+10. Existing notification privacy/deep-link behavior and P2 request rules remain green.
+11. `main` remains schema-mutation-free at application startup; Alembic remains the schema owner.
