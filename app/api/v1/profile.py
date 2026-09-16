@@ -8,12 +8,11 @@ POST  /profile/fcm-token        — create/update FCM token for current user
 GET   /profile/donation-history — paginated donation history
 """
 
-from datetime import datetime
-
 from fastapi import APIRouter, HTTPException, status
 from sqlmodel import select
 
 from app.core.deps import CurrentUser, DbSession
+from app.core.time import utc_now
 from app.db.models import DonationHistory, FCMToken
 from app.schemas.user import UserResponse, ProfileUpdate, ProfileComplete
 from app.schemas.donation_history import DonationHistoryResponse
@@ -45,8 +44,8 @@ def update_profile(body: ProfileUpdate, user: CurrentUser, session: DbSession):
     for key, value in update_data.items():
         setattr(user, key, value)
     if "latitude" in update_data or "longitude" in update_data:
-        user.last_location_updated = datetime.utcnow()
-    user.updated_at = datetime.utcnow()
+        user.last_location_updated = utc_now()
+    user.updated_at = utc_now()
     session.add(user)
     session.commit()
     session.refresh(user)
@@ -64,8 +63,8 @@ def complete_profile(body: ProfileComplete, user: CurrentUser, session: DbSessio
     for key, value in body.model_dump(exclude_none=True).items():
         setattr(user, key, value)
     if body.latitude is not None and body.longitude is not None:
-        user.last_location_updated = datetime.utcnow()
-    user.updated_at = datetime.utcnow()
+        user.last_location_updated = utc_now()
+    user.updated_at = utc_now()
     session.add(user)
     session.commit()
     session.refresh(user)
@@ -83,7 +82,7 @@ def register_fcm_token(body: FCMTokenUpsertRequest, user: CurrentUser, session: 
         existing_for_user.token = body.fcm_token
         if body.device_info:
             existing_for_user.device_info = body.device_info
-        existing_for_user.created_at = datetime.utcnow()
+        existing_for_user.created_at = utc_now()
         session.add(existing_for_user)
         session.commit()
         session.refresh(existing_for_user)
@@ -97,7 +96,7 @@ def register_fcm_token(body: FCMTokenUpsertRequest, user: CurrentUser, session: 
         existing_for_token.user_id = user.id
         if body.device_info:
             existing_for_token.device_info = body.device_info
-        existing_for_token.created_at = datetime.utcnow()
+        existing_for_token.created_at = utc_now()
         session.add(existing_for_token)
         session.commit()
         session.refresh(existing_for_token)

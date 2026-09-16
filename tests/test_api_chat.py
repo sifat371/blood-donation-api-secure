@@ -16,6 +16,7 @@ from datetime import date, timedelta
 
 import pytest
 
+from app.core.time import business_today
 from app.core.config import settings
 from app.db.models import BloodGroup, ConversationHistory, ConversationRole
 from app.services.chat_agent import (
@@ -89,16 +90,16 @@ def test_ab_is_preferred_over_a_or_b():
 
 
 def test_today_and_tomorrow():
-    assert parse_relative_date("today") == date.today().isoformat()
-    assert parse_relative_date("tomorrow") == (date.today() + timedelta(days=1)).isoformat()
+    assert parse_relative_date("today") == business_today().isoformat()
+    assert parse_relative_date("tomorrow") == (business_today() + timedelta(days=1)).isoformat()
     assert parse_relative_date("day after tomorrow") == (
-        date.today() + timedelta(days=2)
+        business_today() + timedelta(days=2)
     ).isoformat()
 
 
 def test_bangla_dates():
-    assert parse_relative_date("আজ") == date.today().isoformat()
-    assert parse_relative_date("আগামীকাল") == (date.today() + timedelta(days=1)).isoformat()
+    assert parse_relative_date("আজ") == business_today().isoformat()
+    assert parse_relative_date("আগামীকাল") == (business_today() + timedelta(days=1)).isoformat()
 
 
 def test_a_named_weekday_is_always_in_the_future():
@@ -110,8 +111,8 @@ def test_a_named_weekday_is_always_in_the_future():
     """
     for day in ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
         parsed = date.fromisoformat(parse_relative_date(f"next {day}"))
-        assert parsed > date.today(), day
-        assert (parsed - date.today()).days <= 7
+        assert parsed > business_today(), day
+        assert (parsed - business_today()).days <= 7
 
 
 def test_an_explicit_iso_date_passes_through():
@@ -119,8 +120,8 @@ def test_an_explicit_iso_date_passes_through():
 
 
 def test_time_of_day_resolves_to_today():
-    assert parse_relative_date("this evening") == date.today().isoformat()
-    assert parse_relative_date("tonight") == date.today().isoformat()
+    assert parse_relative_date("this evening") == business_today().isoformat()
+    assert parse_relative_date("tonight") == business_today().isoformat()
 
 
 @pytest.mark.parametrize("text", ["hello", "sometime soon", "", "as fast as possible"])

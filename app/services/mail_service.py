@@ -20,11 +20,11 @@ instead of quietly writing verification codes to disk.
 import logging
 import re
 import smtplib
-from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.time import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ def _build_message(to: str, subject: str, body: str) -> EmailMessage:
 
 def _safe_filename(email: str) -> str:
     stem = re.sub(r"[^A-Za-z0-9._@-]", "_", email)
-    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
+    stamp = utc_now().strftime("%Y%m%d-%H%M%S-%f")
     return f"{stamp}_{stem}.eml"
 
 

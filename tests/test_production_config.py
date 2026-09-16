@@ -58,3 +58,10 @@ def test_development_keeps_convenient_defaults():
         }
     )
     assert config.validate_runtime_settings(dev) is None
+
+
+def test_production_rejects_invalid_business_timezone():
+    with pytest.raises(RuntimeError, match="BUSINESS_TIMEZONE"):
+        config.validate_runtime_settings(
+            _production_settings(business_timezone="Not/A_Real_Zone")
+        )

@@ -20,8 +20,6 @@ addresses, stack traces, or token material.
 """
 
 import logging
-from datetime import datetime
-
 from fastapi import APIRouter, HTTPException, status, Depends, Request
 from sqlmodel import Session, select
 from slowapi import Limiter
@@ -30,6 +28,7 @@ from slowapi.util import get_remote_address
 limiter = Limiter(key_func=get_remote_address)
 
 from app.core.config import settings
+from app.core.time import utc_now
 from app.core.deps import DbSession
 from app.core.security import (
     dummy_password_verify,
@@ -393,7 +392,7 @@ async def google_login(request: Request, body: GoogleAuthRequest, session: DbSes
             google_id=google_sub,
             profile_photo=payload.get("picture"),
             email_verified=google_says_verified,
-            email_verified_at=datetime.utcnow() if google_says_verified else None,
+            email_verified_at=utc_now() if google_says_verified else None,
             auth_provider=AuthProvider.GOOGLE.value,
         )
         session.add(user)
@@ -416,7 +415,7 @@ async def google_login(request: Request, body: GoogleAuthRequest, session: DbSes
             )
         if google_says_verified and not user.email_verified:
             user.email_verified = True
-            user.email_verified_at = datetime.utcnow()
+            user.email_verified_at = utc_now()
             changed = True
         if not user.profile_photo and payload.get("picture"):
             user.profile_photo = payload.get("picture")
@@ -434,7 +433,7 @@ async def google_login(request: Request, body: GoogleAuthRequest, session: DbSes
             changed = True
 
         if changed:
-            user.updated_at = datetime.utcnow()
+            user.updated_at = utc_now()
             session.add(user)
             session.commit()
             session.refresh(user)
@@ -538,7 +537,7 @@ def dev_login(request: Request, body: DevLoginRequest, session: DbSession):
             name=body.name,
             email=email,
             email_verified=True,
-            email_verified_at=datetime.utcnow(),
+            email_verified_at=utc_now(),
             auth_provider=AuthProvider.GOOGLE.value,
         )
         session.add(user)

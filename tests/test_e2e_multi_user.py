@@ -24,6 +24,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
+from app.core.time import business_today
 from app.db.models import BloodGroup
 from app.services.eligibility import ELIGIBILITY_DAYS
 
@@ -137,7 +138,7 @@ def test_full_requester_and_donor_workflow(
     # 06:00 in Bangladesh (UTC+6) a fresh donation records as "yesterday" and the
     # 90-day cooldown ends a day early. A one-day skew on a 90-day rule, not a
     # blocker — but this test pins the current behaviour rather than hiding it.
-    assert donor_profile["last_donation_date"] == str(datetime.utcnow().date())
+    assert donor_profile["last_donation_date"] == str(business_today())
 
     # The donor is no longer eligible, so they drop out of donor search.
     donors_after = recipient_client.get(
@@ -295,7 +296,7 @@ def test_an_unavailable_donor_is_excluded_from_search(
 def test_eligibility_boundary_in_donor_search(
     recipient_client, donor_user, session, days_ago, expected_in_results
 ):
-    donor_user.last_donation_date = date.today() - timedelta(days=days_ago)
+    donor_user.last_donation_date = business_today() - timedelta(days=days_ago)
     session.add(donor_user)
     session.commit()
 

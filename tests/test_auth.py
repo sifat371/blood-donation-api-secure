@@ -44,3 +44,20 @@ def test_revoke_refresh_token(session, sample_user):
     raw = create_refresh_token(session, sample_user.id)
     assert revoke_refresh_token(session, raw) is True
     assert revoke_refresh_token(session, "nonexistent") is False
+
+
+def test_refresh_rotation_commits_old_and_new_token_once(session, sample_user, monkeypatch):
+    raw = create_refresh_token(session, sample_user.id)
+    real_commit = session.commit
+    commits = 0
+
+    def counting_commit():
+        nonlocal commits
+        commits += 1
+        return real_commit()
+
+    monkeypatch.setattr(session, "commit", counting_commit)
+    new_access, new_refresh, uid = rotate_refresh_token(session, raw)
+    assert uid == sample_user.id
+    assert new_access and new_refresh
+    assert commits == 1

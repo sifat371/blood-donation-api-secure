@@ -11,6 +11,8 @@ from typing import Optional
 from sqlmodel import SQLModel, Field, Column
 from sqlalchemy import Text, JSON
 
+from app.core.time import utc_now
+
 
 # ──────────────────────── Enums ────────────────────────
 
@@ -31,6 +33,7 @@ class RequestStatus(str, Enum):
     ACCEPTED = "Accepted"
     COMPLETED = "Completed"
     CANCELLED = "Cancelled"
+    EXPIRED = "Expired"
 
 
 class NotificationType(str, Enum):
@@ -91,8 +94,8 @@ class User(SQLModel, table=True):
     is_available: bool = Field(default=True)
     gender: Optional[str] = Field(default=None)
     date_of_birth: Optional[date] = Field(default=None)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class FCMToken(SQLModel, table=True):
@@ -102,7 +105,7 @@ class FCMToken(SQLModel, table=True):
     user_id: int = Field(foreign_key="users.id", index=True)
     token: str = Field(unique=True, index=True)
     device_info: str= Field(default='android')
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=utc_now)
 
 class BloodRequest(SQLModel, table=True):
     __tablename__ = "blood_requests"
@@ -121,8 +124,8 @@ class BloodRequest(SQLModel, table=True):
     notes: Optional[str] = Field(default=None, sa_column=Column(Text))
     status: str = Field(default=RequestStatus.PENDING.value)  # RequestStatus enum value
     accepted_by: Optional[int] = Field(default=None, foreign_key="users.id")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class DonationHistory(SQLModel, table=True):
@@ -136,7 +139,7 @@ class DonationHistory(SQLModel, table=True):
     hospital: Optional[str] = Field(default=None)
     blood_group: str  # BloodGroup enum value
     status: str = Field(default="Completed")
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class Notification(SQLModel, table=True):
@@ -149,7 +152,7 @@ class Notification(SQLModel, table=True):
     body: str = Field(sa_column=Column(Text))
     data: Optional[str] = Field(default=None, sa_column=Column(Text))  # JSON string
     is_read: bool = Field(default=False)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class RefreshToken(SQLModel, table=True):
@@ -160,7 +163,7 @@ class RefreshToken(SQLModel, table=True):
     token_hash: str = Field(unique=True, index=True)
     expires_at: datetime
     revoked: bool = Field(default=False)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class EmailVerification(SQLModel, table=True):
@@ -184,7 +187,7 @@ class EmailVerification(SQLModel, table=True):
     consumed: bool = Field(default=False)
     consumed_at: Optional[datetime] = Field(default=None)
     attempts: int = Field(default=0)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class AuditLog(SQLModel, table=True):
@@ -196,7 +199,7 @@ class AuditLog(SQLModel, table=True):
     entity: str
     entity_id: Optional[str] = Field(default=None)
     metadata_json: Optional[str] = Field(default=None, sa_column=Column(Text))  # JSON string
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class UserLocation(SQLModel, table=True):
@@ -206,7 +209,7 @@ class UserLocation(SQLModel, table=True):
     user_id: int = Field(foreign_key="users.id", index=True)
     latitude: float
     longitude: float
-    recorded_at: datetime = Field(default_factory=datetime.utcnow)
+    recorded_at: datetime = Field(default_factory=utc_now)
 
 
 class ConversationHistory(SQLModel, table=True):
@@ -218,4 +221,4 @@ class ConversationHistory(SQLModel, table=True):
     content: str = Field(sa_column=Column(Text))
     tool_name: Optional[str] = Field(default=None)
     tool_payload: Optional[str] = Field(default=None, sa_column=Column(Text))  # JSON string
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utc_now)

@@ -59,14 +59,22 @@ def create_request(
         notes=body.notes,
         status=RequestStatus.PENDING.value,
     )
-    session.add(blood_request)
-    session.commit()
-    session.refresh(blood_request)
-
-    audit_log(
-        session, user.id, "blood_request_created", "blood_request",
-        str(blood_request.id),
-    )
+    try:
+        session.add(blood_request)
+        session.flush()
+        audit_log(
+            session,
+            user.id,
+            "blood_request_created",
+            "blood_request",
+            str(blood_request.id),
+            commit=False,
+        )
+        session.commit()
+        session.refresh(blood_request)
+    except Exception:
+        session.rollback()
+        raise
 
     # Notify nearby eligible donors after the response is sent.
     background_tasks.add_task(
@@ -120,6 +128,7 @@ def nearby_requests(
     offset: int = Query(0, ge=0),
 ):
     """Active (Pending) requests near a location, for donors to browse."""
+    request_service.expire_stale_requests(session)
     stmt = select(BloodRequest).where(
         BloodRequest.status == RequestStatus.PENDING.value,
         BloodRequest.latitude.isnot(None),
@@ -163,6 +172,7 @@ def my_requests(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
+    request_service.expire_stale_requests(session)
     stmt = (
         select(BloodRequest)
         .where(BloodRequest.recipient_id == user.id)

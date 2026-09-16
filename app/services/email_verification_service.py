@@ -24,6 +24,7 @@ from typing import Optional, Tuple
 from sqlmodel import Session, select
 
 from app.core.config import settings
+from app.core.time import utc_now
 from app.core.security import (
     codes_match,
     generate_numeric_code,
@@ -50,7 +51,7 @@ class ResendResult(str, Enum):
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return utc_now()
 
 
 def _invalidate_outstanding(session: Session, user_id: int) -> None:

@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 from sqlmodel import Session
 
 from app.db.database import engine, create_db_and_tables
+from app.core.time import business_today
 from app.db.models import (
     User,
     BloodRequest,
@@ -41,7 +42,7 @@ def seed():
                 is_available=True,
                 gender="Male",
                 date_of_birth=date(1995, 3, 15),
-                last_donation_date=date.today() - timedelta(days=120),
+                last_donation_date=business_today() - timedelta(days=120),
             ),
             User(
                 name="Fatima Akter",
@@ -72,7 +73,7 @@ def seed():
                 is_available=True,
                 gender="Male",
                 date_of_birth=date(1990, 11, 5),
-                last_donation_date=date.today() - timedelta(days=30),
+                last_donation_date=business_today() - timedelta(days=30),
             ),
             User(
                 name="Nasreen Begum",
@@ -103,7 +104,7 @@ def seed():
                 is_available=True,
                 gender="Male",
                 date_of_birth=date(1988, 6, 30),
-                last_donation_date=date.today() - timedelta(days=95),
+                last_donation_date=business_today() - timedelta(days=95),
             ),
         ]
 
@@ -126,7 +127,7 @@ def seed():
                 hospital_address="Secretariat Rd, Dhaka 1000",
                 latitude=23.7265,
                 longitude=90.3977,
-                needed_date=date.today() + timedelta(days=1),
+                needed_date=business_today() + timedelta(days=1),
                 contact_number="+8801711000002",
                 notes="Urgent — surgery scheduled for tomorrow morning",
                 status=RequestStatus.PENDING.value,
@@ -140,7 +141,7 @@ def seed():
                 hospital_address="18/F, Bir Uttam Qazi Nuruzzaman Sarak, Dhaka",
                 latitude=23.7527,
                 longitude=90.3816,
-                needed_date=date.today() + timedelta(days=3),
+                needed_date=business_today() + timedelta(days=3),
                 contact_number="+8801711000004",
                 status=RequestStatus.PENDING.value,
             ),
@@ -157,7 +158,7 @@ def seed():
         donation = DonationHistory(
             donor_id=users[0].id,  # Rahim
             request_id=None,
-            date=date.today() - timedelta(days=120),
+            date=business_today() - timedelta(days=120),
             recipient="Shahid Clinic Patient",
             hospital="Shahid Suhrawardy Medical College",
             blood_group=BloodGroup.O_POS.value,

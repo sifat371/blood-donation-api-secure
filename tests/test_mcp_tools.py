@@ -13,6 +13,7 @@ from datetime import date, timedelta
 import pytest
 
 from app.db.models import BloodGroup, RequestStatus
+from app.core.time import business_today
 from app.mcp_tools.tools import (
     TOOL_DEFINITIONS,
     TOOL_MAP,
@@ -27,7 +28,7 @@ def _payload(**overrides) -> dict:
         "blood_group": BloodGroup.O_POS.value,
         "units": 2,
         "hospital_name": "Dhaka Medical College Hospital",
-        "needed_date": str(date.today() + timedelta(days=1)),
+        "needed_date": str(business_today() + timedelta(days=1)),
         "contact_number": "+8801711111111",
         "latitude": 23.7261,
         "longitude": 90.3960,
@@ -96,7 +97,7 @@ def test_get_donation_history_reads_only_the_callers_records(
         DonationHistory(
             donor_id=donor_user.id,
             blood_group=donor_user.blood_group,
-            date=date.today(),
+            date=business_today(),
             status="Completed",
         )
     )
@@ -359,3 +360,88 @@ def test_find_donors_excludes_ineligible_donors(
         },
     )
     assert ineligible_donor.id not in [d["id"] for d in result]
+
+
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("FindDonors", {"blood_group": "Z+", "latitude": 23.7, "longitude": 90.4}),
+        ("FindDonors", {"blood_group": "O+", "latitude": 91, "longitude": 90.4}),
+        ("FindDonors", {"blood_group": "O+", "latitude": 23.7, "longitude": 90.4, "radius_km": 101}),
+        ("GetNearbyRequests", {"latitude": -91, "longitude": 90.4}),
+        ("UpdateAvailability", {"is_available": "false"}),
+        ("UpdateUserLocation", {"latitude": 23.7, "longitude": 181}),
+    ],
+)
+def test_untrusted_tool_arguments_are_strictly_validated(
+    session, sample_user, tool_name, args
+):
+    result = dispatch_tool(session, sample_user, tool_name, args)
+    assert isinstance(result, dict) and "error" in result
+
+
+def test_unknown_non_identity_tool_argument_is_rejected(session, sample_user):
+    result = dispatch_tool(
+        session, sample_user, "CheckEligibility", {"surprise": "value"}
+    )
+    assert "error" in result
+
+
+def test_find_donors_caps_ai_results(session, sample_user):
+    from app.db.models import User
+
+    for index in range(25):
+        session.add(
+            User(
+                name=f"Bulk Donor {index}",
+                email=f"bulk{index}@example.com",
+                email_verified=True,
+                phone=f"+880180000{index:04d}",
+                blood_group=BloodGroup.O_POS.value,
+                latitude=23.75 + index * 0.0001,
+                longitude=90.39,
+                is_available=True,
+            )
+        )
+    session.commit()
+
+    result = dispatch_tool(
+        session,
+        sample_user,
+        "FindDonors",
+        {
+            "blood_group": "O+",
+            "latitude": 23.75,
+            "longitude": 90.39,
+            "radius_km": 100,
+        },
+    )
+    assert len(result) == 20
+
+
+def test_nearby_requests_caps_ai_results(session, sample_user):
+    from app.db.models import BloodRequest
+    from app.core.time import business_today
+
+    for index in range(25):
+        session.add(
+            BloodRequest(
+                recipient_id=sample_user.id,
+                patient_name=f"Patient {index}",
+                blood_group=BloodGroup.O_POS.value,
+                units=1,
+                hospital_name=f"Hospital {index}",
+                latitude=23.75 + index * 0.0001,
+                longitude=90.39,
+                needed_date=business_today(),
+                contact_number="+8801700000999",
+                status=RequestStatus.PENDING.value,
+            )
+        )
+    session.commit()
+
+    result = dispatch_tool(
+        session, sample_user, "GetNearbyRequests",
+        {"latitude": 23.75, "longitude": 90.39, "radius_km": 100},
+    )
+    assert len(result) == 20

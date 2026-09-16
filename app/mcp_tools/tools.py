@@ -10,7 +10,6 @@ are untrusted input; any `user_id` in them is discarded.
 """
 
 import logging
-from datetime import datetime
 from typing import Optional, List, Any
 
 from fastapi import HTTPException
@@ -27,6 +26,12 @@ from app.db.models import (
     NotificationType,
 )
 from app.schemas.blood_request import BloodRequestCreate, MIN_REQUEST_UNITS
+from app.schemas.mcp import (
+    MCP_MAX_RESULTS,
+    format_tool_validation_error,
+    validate_tool_args,
+)
+from app.core.time import utc_now
 from app.services import request_service
 from app.services.geo import haversine_distance
 from app.services.eligibility import is_eligible, days_until_eligible
@@ -173,7 +178,7 @@ def find_donors(
             })
 
     results.sort(key=lambda x: x["distance_km"])
-    return results
+    return results[:MCP_MAX_RESULTS]
 
 
 def create_blood_request(
@@ -233,13 +238,22 @@ def create_blood_request(
         notes=validated.notes,
         status=RequestStatus.PENDING.value,
     )
-    session.add(req)
-    session.commit()
-    session.refresh(req)
-
-    audit_log(
-        session, user.id, "blood_request_created", "blood_request", str(req.id)
-    )
+    try:
+        session.add(req)
+        session.flush()
+        audit_log(
+            session,
+            user.id,
+            "blood_request_created",
+            "blood_request",
+            str(req.id),
+            commit=False,
+        )
+        session.commit()
+        session.refresh(req)
+    except Exception:
+        session.rollback()
+        raise
 
     # Same donor fan-out as POST /blood-requests, so a request created through
     # chat actually reaches donors.
@@ -336,6 +350,7 @@ def get_nearby_requests(
     radius_km: float = 20,
 ) -> List[dict]:
     """GetNearbyRequests tool."""
+    request_service.expire_stale_requests(session)
     stmt = select(BloodRequest).where(
         BloodRequest.status == RequestStatus.PENDING.value,
         BloodRequest.latitude.isnot(None),
@@ -357,7 +372,7 @@ def get_nearby_requests(
                 "status": req.status,
             })
     results.sort(key=lambda x: x["distance_km"])
-    return results
+    return results[:MCP_MAX_RESULTS]
 
 
 def update_availability(session: Session, user_id: int, is_available: bool) -> dict:
@@ -366,7 +381,7 @@ def update_availability(session: Session, user_id: int, is_available: bool) -> d
     if user is None:
         return {"error": "User not found"}
     user.is_available = is_available
-    user.updated_at = datetime.utcnow()
+    user.updated_at = utc_now()
     session.add(user)
     session.commit()
     return {
@@ -405,8 +420,8 @@ def update_user_location(
         return {"error": "User not found"}
     user.latitude = latitude
     user.longitude = longitude
-    user.last_location_updated = datetime.utcnow()
-    user.updated_at = datetime.utcnow()
+    user.last_location_updated = utc_now()
+    user.updated_at = utc_now()
     session.add(user)
 
     # Write breadcrumb to user_locations table
@@ -515,6 +530,14 @@ def dispatch_tool(
             tool_name,
             user.id,
         )
+
+    try:
+        safe_args = validate_tool_args(tool_name, safe_args)
+    except ValidationError as exc:
+        return {
+            "error": f"Invalid arguments for {tool_name}: "
+            f"{format_tool_validation_error(exc)}"
+        }
 
     try:
         if tool_name in _TOOLS_TAKING_USER:
