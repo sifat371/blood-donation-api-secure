@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Optional
 
 from sqlmodel import SQLModel, Field, Column
-from sqlalchemy import Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, Text, UniqueConstraint
 
 from app.core.time import utc_now
 
@@ -128,11 +128,19 @@ class DonationCommitment(SQLModel, table=True):
         UniqueConstraint(
             "request_id", "donor_id", name="uq_commitment_request_donor"
         ),
+        UniqueConstraint(
+            "request_id", "slot_number", name="uq_commitment_request_slot"
+        ),
+        CheckConstraint(
+            "slot_number IS NULL OR slot_number > 0",
+            name="ck_commitment_positive_slot",
+        ),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     request_id: int = Field(foreign_key="blood_requests.id", index=True)
     donor_id: int = Field(foreign_key="users.id", index=True)
+    slot_number: Optional[int] = Field(default=None)
     status: str = Field(default=CommitmentStatus.COMMITTED.value, index=True)
     committed_at: datetime = Field(default_factory=utc_now)
     completed_at: Optional[datetime] = Field(default=None)
