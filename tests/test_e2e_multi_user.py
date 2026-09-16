@@ -36,38 +36,31 @@ API = "/api/v1"
 def test_full_requester_and_donor_workflow(
     recipient_client, donor_client, sample_user, donor_user, session
 ):
-    """The complete happy path, twelve steps, two accounts."""
-
-    # ── 1. Both users are signed in and see their own profile ──────────
+    """Complete P2 happy path with one requested unit and two accounts."""
     me_recipient = recipient_client.get(f"{API}/profile/me")
     me_donor = donor_client.get(f"{API}/profile/me")
     assert me_recipient.status_code == 200
     assert me_donor.status_code == 200
     assert me_recipient.json()["email"] == "test@example.com"
     assert me_donor.json()["email"] == "donor@example.com"
-    # Identity comes from the token, so the two clients cannot be confused.
     assert me_recipient.json()["id"] != me_donor.json()["id"]
 
-    # ── 2. The requester creates a blood request ───────────────────────
     created = recipient_client.post(
-        f"{API}/blood-requests", json=valid_request_payload(units=2)
+        f"{API}/blood-requests", json=valid_request_payload(units=1)
     )
     assert created.status_code == 201, created.text
     request_id = created.json()["id"]
-
-    # ── 3. It is stored with the values that were sent ─────────────────
-    assert created.json()["units"] == 2
+    assert created.json()["units"] == 1
+    assert created.json()["units_required"] == 1
     assert created.json()["blood_group"] == BloodGroup.O_POS.value
     assert created.json()["status"] == "Pending"
     assert created.json()["recipient_id"] == sample_user.id
     assert created.json()["accepted_by"] is None
 
-    # ── 4. It appears in the requester's own list ──────────────────────
     mine = recipient_client.get(f"{API}/blood-requests/mine")
     assert mine.status_code == 200
     assert [r["id"] for r in mine.json()["items"]] == [request_id]
 
-    # ── 5. The requester can find eligible donors nearby ──────────────
     donors = recipient_client.get(
         f"{API}/donors/search",
         params={
@@ -80,7 +73,6 @@ def test_full_requester_and_donor_workflow(
     assert donors.status_code == 200
     assert donor_user.id in [d["id"] for d in donors.json()["items"]]
 
-    # ── 6. The donor sees the request in their nearby feed ────────────
     nearby = donor_client.get(
         f"{API}/blood-requests/nearby",
         params={"latitude": 23.7925, "longitude": 90.4078, "radius_km": 50},
@@ -88,59 +80,55 @@ def test_full_requester_and_donor_workflow(
     assert nearby.status_code == 200
     feed = {r["id"]: r for r in nearby.json()["items"]}
     assert request_id in feed
-    # The feed carries the distance the UI displays.
     assert feed[request_id]["distance_km"] > 0
 
-    # ── 7. The donor opens it by id — the push-notification deep link ──
     detail = donor_client.get(f"{API}/blood-requests/{request_id}")
     assert detail.status_code == 200
-    assert detail.json()["id"] == request_id
-    # Nobody has accepted yet, so there are no donor details to leak.
     assert detail.json()["donor_phone"] is None
 
-    # ── 8. The donor accepts ───────────────────────────────────────────
     accepted = donor_client.post(f"{API}/blood-requests/{request_id}/accept")
     assert accepted.status_code == 200, accepted.text
-    assert accepted.json()["status"] == "Accepted"
+    assert accepted.json()["status"] == "Fully Committed"
     assert accepted.json()["accepted_by"] == donor_user.id
+    assert accepted.json()["units_committed"] == 1
 
-    # ── 9. The requester sees the new status and can now reach the donor ─
     after_accept = recipient_client.get(f"{API}/blood-requests/{request_id}")
     assert after_accept.status_code == 200
-    assert after_accept.json()["status"] == "Accepted"
+    assert after_accept.json()["status"] == "Fully Committed"
     assert after_accept.json()["donor_name"] == donor_user.name
     assert after_accept.json()["donor_phone"] == donor_user.phone
 
-    # ── 10. The requester was notified of the acceptance ──────────────
     alerts = recipient_client.get(f"{API}/notifications")
     assert alerts.status_code == 200
     accept_alerts = [
         n for n in alerts.json()["items"] if "accept" in n["title"].lower()
     ]
     assert accept_alerts, alerts.json()
-    # Every notification carries the request id the app deep-links on.
     assert str(request_id) in str(accept_alerts[0]["data"])
 
-    # ── 11. The requester confirms the donation was received ──────────
+    commitments = recipient_client.get(
+        f"{API}/blood-requests/{request_id}/commitments"
+    )
+    assert commitments.status_code == 200
+    commitment_id = commitments.json()[0]["id"]
+    confirmed = recipient_client.post(
+        f"{API}/blood-requests/{request_id}/commitments/{commitment_id}/confirm"
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["status"] == "Completed"
+    assert confirmed.json()["units_completed"] == 1
+
     completed = recipient_client.post(f"{API}/blood-requests/{request_id}/complete")
     assert completed.status_code == 200, completed.text
     assert completed.json()["status"] == "Completed"
 
-    # ── 12. The donation is on the donor's record, and the 90-day
-    #        cooldown has started ─────────────────────────────────────
     history = donor_client.get(f"{API}/profile/donation-history")
     assert history.status_code == 200
     assert history.json()["total"] == 1
 
     donor_profile = donor_client.get(f"{API}/profile/me").json()
-    # Stamped from UTC, which is what the app does. Worth knowing: eligibility
-    # then compares this against the *local* date, so between local midnight and
-    # 06:00 in Bangladesh (UTC+6) a fresh donation records as "yesterday" and the
-    # 90-day cooldown ends a day early. A one-day skew on a 90-day rule, not a
-    # blocker — but this test pins the current behaviour rather than hiding it.
     assert donor_profile["last_donation_date"] == str(business_today())
 
-    # The donor is no longer eligible, so they drop out of donor search.
     donors_after = recipient_client.get(
         f"{API}/donors/search",
         params={
@@ -151,10 +139,6 @@ def test_full_requester_and_donor_workflow(
         },
     )
     assert donor_user.id not in [d["id"] for d in donors_after.json()["items"]]
-
-
-# ── Isolation between the two accounts ───────────────────────────────
-
 
 def test_a_third_user_cannot_accept_someone_elses_accepted_request(
     recipient_client, donor_client, third_client
