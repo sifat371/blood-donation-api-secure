@@ -2,7 +2,7 @@
 
 Alembic is the canonical schema history for P2 and later. SQLite remains
 supported for local development, tests, and existing installations; PostgreSQL
-is the intended production database.
+16+ is the production CI target.
 
 ## Existing P1 SQLite installation
 
@@ -32,10 +32,11 @@ runs the normal upgrade path.
 ## New or managed databases
 
 For a new SQLite/PostgreSQL database, or any database that is already managed by
-Alembic, schema changes are applied explicitly:
+Alembic, schema changes are applied explicitly before application startup:
 
 ```bash
 uv run alembic upgrade head
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 The P1 baseline revision creates the schema that existed immediately before P2,
@@ -44,20 +45,47 @@ transform that schema and its data forward.
 
 ## PostgreSQL
 
-PostgreSQL uses the same Alembic revision history and does not run SQLite
-`PRAGMA`, `sqlite_master`, or legacy startup migration code. Configure a
-`postgresql+psycopg://...` `DATABASE_URL`, provision the database, and run:
+Configure a psycopg URL such as:
+
+```text
+DATABASE_URL=postgresql+psycopg://app_user:secret@db.example.com/blood_app
+```
+
+Provision the empty database, then run:
 
 ```bash
 uv run alembic upgrade head
 ```
 
-P2 CI will exercise fresh PostgreSQL upgrades before the branch is eligible to
-merge.
+PostgreSQL uses the same Alembic revision history and never runs SQLite
+`PRAGMA`, `sqlite_master`, `SQLModel.metadata.create_all`, or the retired legacy
+startup migration path. GitHub Actions provisions PostgreSQL 16, upgrades a
+fresh database to head, and runs the migration/commitment/request regression
+subset before P2 is eligible to merge.
 
 ## Application startup boundary
 
-P1 still contains legacy startup migration code while P2 is being built. The
-final P2 rollout removes runtime schema mutation: production/staging schema
-evolution belongs to Alembic, and the API will fail clearly when the configured
-database is unversioned or behind Alembic head.
+Application startup is verification-only:
+
+1. validate runtime configuration;
+2. call `assert_schema_at_head(engine)`;
+3. initialise Firebase on a best-effort basis;
+4. serve requests.
+
+Startup does **not** create, alter, stamp, or upgrade tables. If the database is
+unversioned or its `alembic_version` is behind the repository head, startup
+raises a clear error and the operator must migrate first.
+
+That separation is deliberate: schema evolution is a deployment action, not an
+API side effect. It also prevents two application replicas from racing to alter
+the same production database during startup.
+
+## Checking revision state
+
+```bash
+uv run alembic current
+uv run alembic heads
+```
+
+For a deployable database, `current` must resolve to the same revision as the
+single configured Alembic head.
