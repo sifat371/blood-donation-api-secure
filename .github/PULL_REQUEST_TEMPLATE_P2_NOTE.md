@@ -1,0 +1,1 @@
+P2 is being implemented test-first on the `p2-core` branch. This file is temporary branch-local execution metadata and will be removed before merge.
