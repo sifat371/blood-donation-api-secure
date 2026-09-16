@@ -5,7 +5,7 @@ one-unit DonationCommitment rows. The service layer owns authorization,
 privacy, status derivation and transactions so REST and MCP cannot drift.
 """
 
-from fastapi import APIRouter, Query, Request, BackgroundTasks
+from fastapi import APIRouter, Query, Request
 from sqlmodel import select
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -21,6 +21,7 @@ from app.schemas.common import PaginatedResponse
 from app.services import request_service
 from app.services.geo import haversine_distance
 from app.services.auth_service import audit_log
+from app.services.outbox_service import enqueue_outbox_event
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/blood-requests", tags=["Blood Requests"])
@@ -33,7 +34,6 @@ def create_request(
     body: BloodRequestCreate,
     user: CurrentUser,
     session: DbSession,
-    background_tasks: BackgroundTasks,
 ):
     blood_request = BloodRequest(
         recipient_id=user.id,
@@ -60,15 +60,20 @@ def create_request(
             str(blood_request.id),
             commit=False,
         )
+        enqueue_outbox_event(
+            session,
+            "blood_request_created",
+            "blood_request",
+            str(blood_request.id),
+            {"request_id": blood_request.id},
+            f"blood_request_created:{blood_request.id}",
+        )
         session.commit()
         session.refresh(blood_request)
     except Exception:
         session.rollback()
         raise
 
-    background_tasks.add_task(
-        request_service.notify_nearby_donors_task, blood_request.id
-    )
     return request_service.build_response(session, blood_request, viewer=user)
 
 
