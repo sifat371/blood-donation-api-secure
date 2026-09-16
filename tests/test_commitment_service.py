@@ -16,7 +16,7 @@ from app.db.models import (
     RequestStatus,
     User,
 )
-from app.services.request_service import (
+from app.services.commitment_service import (
     commitment_counts,
     commit_to_request,
     confirm_commitment,
