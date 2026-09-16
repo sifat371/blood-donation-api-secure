@@ -246,7 +246,12 @@ def test_update_request_cannot_cancel_another_users_request(
 
 
 def test_update_request_cannot_complete_as_the_donor(session, sample_user, donor_user):
-    created = dispatch_tool(session, sample_user, "CreateBloodRequest", _payload())
+    from sqlmodel import select
+    from app.db.models import DonationCommitment
+
+    created = dispatch_tool(
+        session, sample_user, "CreateBloodRequest", _payload(units=1)
+    )
     request_id = created["id"]
 
     accepted = dispatch_tool(
@@ -257,7 +262,6 @@ def test_update_request_cannot_complete_as_the_donor(session, sample_user, donor
     )
     assert "error" not in accepted, accepted
 
-    # Completion is the recipient's confirmation.
     as_donor = dispatch_tool(
         session,
         donor_user,
@@ -265,6 +269,20 @@ def test_update_request_cannot_complete_as_the_donor(session, sample_user, donor
         {"request_id": request_id, "action": "complete"},
     )
     assert "error" in as_donor, as_donor
+
+    commitment = session.exec(
+        select(DonationCommitment).where(
+            DonationCommitment.request_id == request_id,
+            DonationCommitment.donor_id == donor_user.id,
+        )
+    ).one()
+    confirmed = dispatch_tool(
+        session,
+        sample_user,
+        "ConfirmDonation",
+        {"request_id": request_id, "commitment_id": commitment.id},
+    )
+    assert confirmed["status"] == RequestStatus.COMPLETED.value
 
     as_recipient = dispatch_tool(
         session,
@@ -274,7 +292,6 @@ def test_update_request_cannot_complete_as_the_donor(session, sample_user, donor
     )
     assert "error" not in as_recipient, as_recipient
     assert as_recipient["status"] == RequestStatus.COMPLETED.value
-
 
 def test_update_request_rejects_an_unknown_action(session, sample_user):
     created = dispatch_tool(session, sample_user, "CreateBloodRequest", _payload())
@@ -419,7 +436,7 @@ def test_find_donors_caps_ai_results(session, sample_user):
     assert len(result) == 20
 
 
-def test_nearby_requests_caps_ai_results(session, sample_user):
+def test_nearby_requests_caps_ai_results(session, sample_user, donor_user):
     from app.db.models import BloodRequest
     from app.core.time import business_today
 
@@ -441,7 +458,10 @@ def test_nearby_requests_caps_ai_results(session, sample_user):
     session.commit()
 
     result = dispatch_tool(
-        session, sample_user, "GetNearbyRequests",
+        session,
+        donor_user,
+        "GetNearbyRequests",
         {"latitude": 23.75, "longitude": 90.39, "radius_km": 100},
     )
     assert len(result) == 20
+

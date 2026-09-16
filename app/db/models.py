@@ -1,20 +1,13 @@
-"""
-Blood Donation App — SQLModel table definitions.
-
-All tables referenced by §1 of Implementation.md.
-"""
+"""Blood Donation App — SQLModel table definitions."""
 
 from datetime import datetime, date
 from enum import Enum
 from typing import Optional
 
 from sqlmodel import SQLModel, Field, Column
-from sqlalchemy import Text, JSON
+from sqlalchemy import CheckConstraint, Text, UniqueConstraint
 
 from app.core.time import utc_now
-
-
-# ──────────────────────── Enums ────────────────────────
 
 
 class BloodGroup(str, Enum):
@@ -30,10 +23,20 @@ class BloodGroup(str, Enum):
 
 class RequestStatus(str, Enum):
     PENDING = "Pending"
+    # Migration input compatibility only. P2 runtime never writes Accepted.
     ACCEPTED = "Accepted"
+    PARTIALLY_COMMITTED = "Partially Committed"
+    FULLY_COMMITTED = "Fully Committed"
     COMPLETED = "Completed"
     CANCELLED = "Cancelled"
     EXPIRED = "Expired"
+
+
+class CommitmentStatus(str, Enum):
+    COMMITTED = "Committed"
+    COMPLETED = "Completed"
+    WITHDRAWN = "Withdrawn"
+    CANCELLED = "Cancelled"
 
 
 class NotificationType(str, Enum):
@@ -52,20 +55,9 @@ class ConversationRole(str, Enum):
 
 
 class AuthProvider(str, Enum):
-    """
-    How an account can authenticate.
-
-    `google_id` and `hashed_password` remain the source of truth for what is
-    actually usable; this is the human-readable summary, kept in step with them
-    so a single column answers "how does this person sign in".
-    """
-
     GOOGLE = "google"
     PASSWORD = "password"
     BOTH = "both"
-
-
-# ──────────────────────── Tables ───────────────────────
 
 
 class User(SQLModel, table=True):
@@ -76,14 +68,12 @@ class User(SQLModel, table=True):
     email: str = Field(unique=True, index=True)
     google_id: Optional[str] = Field(default=None, unique=True, index=True)
     hashed_password: Optional[str] = Field(default=None)
-    # Gate on sign-in for password accounts. Google sign-in sets this from the
-    # verified claim in the ID token, because Google has already proven it.
     email_verified: bool = Field(default=False)
     email_verified_at: Optional[datetime] = Field(default=None)
     auth_provider: str = Field(default=AuthProvider.GOOGLE.value)
     profile_photo: Optional[str] = Field(default=None)
     phone: Optional[str] = Field(default=None)
-    blood_group: Optional[str] = Field(default=None)  # BloodGroup enum value
+    blood_group: Optional[str] = Field(default=None)
     division: Optional[str] = Field(default=None)
     district: Optional[str] = Field(default=None)
     upazila: Optional[str] = Field(default=None)
@@ -104,8 +94,9 @@ class FCMToken(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id", index=True)
     token: str = Field(unique=True, index=True)
-    device_info: str= Field(default='android')
+    device_info: str = Field(default="android")
     created_at: datetime = Field(default_factory=utc_now)
+
 
 class BloodRequest(SQLModel, table=True):
     __tablename__ = "blood_requests"
@@ -113,7 +104,7 @@ class BloodRequest(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     recipient_id: int = Field(foreign_key="users.id", index=True)
     patient_name: str
-    blood_group: str  # BloodGroup enum value
+    blood_group: str
     units: int = Field(default=1)
     hospital_name: str
     hospital_address: Optional[str] = Field(default=None)
@@ -122,8 +113,36 @@ class BloodRequest(SQLModel, table=True):
     needed_date: date
     contact_number: str
     notes: Optional[str] = Field(default=None, sa_column=Column(Text))
-    status: str = Field(default=RequestStatus.PENDING.value)  # RequestStatus enum value
-    accepted_by: Optional[int] = Field(default=None, foreign_key="users.id")
+    status: str = Field(default=RequestStatus.PENDING.value)
+    legacy_completion_incomplete: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class DonationCommitment(SQLModel, table=True):
+    __tablename__ = "donation_commitments"
+    __table_args__ = (
+        UniqueConstraint(
+            "request_id", "donor_id", name="uq_commitment_request_donor"
+        ),
+        UniqueConstraint(
+            "request_id", "slot_number", name="uq_commitment_request_slot"
+        ),
+        CheckConstraint(
+            "slot_number IS NULL OR slot_number > 0",
+            name="ck_commitment_positive_slot",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    request_id: int = Field(foreign_key="blood_requests.id", index=True)
+    donor_id: int = Field(foreign_key="users.id", index=True)
+    slot_number: Optional[int] = Field(default=None)
+    status: str = Field(default=CommitmentStatus.COMMITTED.value, index=True)
+    committed_at: datetime = Field(default_factory=utc_now)
+    completed_at: Optional[datetime] = Field(default=None)
+    withdrawn_at: Optional[datetime] = Field(default=None)
+    cancelled_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -134,10 +153,16 @@ class DonationHistory(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     donor_id: int = Field(foreign_key="users.id", index=True)
     request_id: Optional[int] = Field(default=None, foreign_key="blood_requests.id")
+    commitment_id: Optional[int] = Field(
+        default=None,
+        foreign_key="donation_commitments.id",
+        unique=True,
+        index=True,
+    )
     date: date
     recipient: Optional[str] = Field(default=None)
     hospital: Optional[str] = Field(default=None)
-    blood_group: str  # BloodGroup enum value
+    blood_group: str
     status: str = Field(default="Completed")
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -147,10 +172,10 @@ class Notification(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id", index=True)
-    type: str  # NotificationType enum value
+    type: str
     title: str
     body: str = Field(sa_column=Column(Text))
-    data: Optional[str] = Field(default=None, sa_column=Column(Text))  # JSON string
+    data: Optional[str] = Field(default=None, sa_column=Column(Text))
     is_read: bool = Field(default=False)
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -167,20 +192,10 @@ class RefreshToken(SQLModel, table=True):
 
 
 class EmailVerification(SQLModel, table=True):
-    """
-    A single-use email-verification challenge.
-
-    Only the keyed hash of the code is stored, so the table is useless to anyone
-    who reads it. `consumed` makes success one-shot and `attempts` bounds how
-    many guesses a six-digit code will tolerate before it is burned.
-    """
-
     __tablename__ = "email_verifications"
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id", index=True)
-    # Bound to the address that was verified, so a code issued for one account
-    # can never be redeemed against another.
     email: str = Field(index=True)
     code_hash: str = Field(index=True)
     expires_at: datetime
@@ -198,7 +213,7 @@ class AuditLog(SQLModel, table=True):
     action: str
     entity: str
     entity_id: Optional[str] = Field(default=None)
-    metadata_json: Optional[str] = Field(default=None, sa_column=Column(Text))  # JSON string
+    metadata_json: Optional[str] = Field(default=None, sa_column=Column(Text))
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -217,8 +232,8 @@ class ConversationHistory(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id", index=True)
-    role: str  # ConversationRole enum value
+    role: str
     content: str = Field(sa_column=Column(Text))
     tool_name: Optional[str] = Field(default=None)
-    tool_payload: Optional[str] = Field(default=None, sa_column=Column(Text))  # JSON string
+    tool_payload: Optional[str] = Field(default=None, sa_column=Column(Text))
     created_at: datetime = Field(default_factory=utc_now)

@@ -1,17 +1,8 @@
-"""
-Blood request lifecycle endpoints (§2.5)
+"""Blood request lifecycle endpoints.
 
-POST /blood-requests               — create
-POST /blood-requests/{id}/accept   — donor accepts
-POST /blood-requests/{id}/complete — recipient confirms
-POST /blood-requests/{id}/cancel   — cancel
-GET  /blood-requests/nearby        — active near a location
-GET  /blood-requests/mine          — recipient's own requests
-GET  /blood-requests/{id}          — single request detail
-
-The authorisation and status-transition rules live in
-`app/services/request_service.py` so the AI agent's MCP tools enforce exactly
-the same rules.
+P2 preserves the P1 route names while representing donor participation as
+one-unit DonationCommitment rows. The service layer owns authorization,
+privacy, status derivation and transactions so REST and MCP cannot drift.
 """
 
 from fastapi import APIRouter, Query, Request, BackgroundTasks
@@ -19,20 +10,20 @@ from sqlmodel import select
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-limiter = Limiter(key_func=get_remote_address)
-
 from app.core.deps import CurrentUser, DbSession
 from app.db.models import BloodRequest, RequestStatus
-from app.schemas.blood_request import BloodRequestCreate, BloodRequestResponse
+from app.schemas.blood_request import (
+    BloodRequestCreate,
+    BloodRequestResponse,
+    CommitmentResponse,
+)
 from app.schemas.common import PaginatedResponse
 from app.services import request_service
 from app.services.geo import haversine_distance
 from app.services.auth_service import audit_log
 
+limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/blood-requests", tags=["Blood Requests"])
-
-
-# ── Create ───────────────────────────────────────────────
 
 
 @router.post("", response_model=BloodRequestResponse, status_code=201)
@@ -44,7 +35,6 @@ def create_request(
     session: DbSession,
     background_tasks: BackgroundTasks,
 ):
-    """Create a new blood request. Notifies nearby eligible donors."""
     blood_request = BloodRequest(
         recipient_id=user.id,
         patient_name=body.patient_name,
@@ -76,15 +66,10 @@ def create_request(
         session.rollback()
         raise
 
-    # Notify nearby eligible donors after the response is sent.
     background_tasks.add_task(
         request_service.notify_nearby_donors_task, blood_request.id
     )
-
     return request_service.build_response(session, blood_request, viewer=user)
-
-
-# ── Accept ───────────────────────────────────────────────
 
 
 @router.post("/{request_id}/accept", response_model=BloodRequestResponse)
@@ -93,7 +78,34 @@ def accept_request(request_id: int, user: CurrentUser, session: DbSession):
     return request_service.build_response(session, blood_request, viewer=user)
 
 
-# ── Complete ─────────────────────────────────────────────
+@router.post("/{request_id}/withdraw", response_model=BloodRequestResponse)
+def withdraw_request(request_id: int, user: CurrentUser, session: DbSession):
+    blood_request = request_service.withdraw_commitment(session, request_id, user)
+    return request_service.build_response(session, blood_request, viewer=user)
+
+
+@router.post(
+    "/{request_id}/commitments/{commitment_id}/confirm",
+    response_model=BloodRequestResponse,
+)
+def confirm_commitment(
+    request_id: int,
+    commitment_id: int,
+    user: CurrentUser,
+    session: DbSession,
+):
+    blood_request = request_service.confirm_commitment(
+        session, request_id, commitment_id, user
+    )
+    return request_service.build_response(session, blood_request, viewer=user)
+
+
+@router.get(
+    "/{request_id}/commitments",
+    response_model=list[CommitmentResponse],
+)
+def list_commitments(request_id: int, user: CurrentUser, session: DbSession):
+    return request_service.list_commitments_for_user(session, request_id, user)
 
 
 @router.post("/{request_id}/complete", response_model=BloodRequestResponse)
@@ -102,21 +114,13 @@ def complete_request(request_id: int, user: CurrentUser, session: DbSession):
     return request_service.build_response(session, blood_request, viewer=user)
 
 
-# ── Cancel ───────────────────────────────────────────────
-
-
 @router.post("/{request_id}/cancel", response_model=BloodRequestResponse)
 def cancel_request(request_id: int, user: CurrentUser, session: DbSession):
     blood_request = request_service.cancel_request(session, request_id, user)
     return request_service.build_response(session, blood_request, viewer=user)
 
 
-# ── Nearby ───────────────────────────────────────────────
-#
-# NOTE: the literal routes /nearby and /mine must stay declared *above*
-# GET /{request_id}, otherwise the path-parameter route would shadow them.
-
-
+# Literal routes must remain above GET /{request_id}.
 @router.get("/nearby", response_model=PaginatedResponse[BloodRequestResponse])
 def nearby_requests(
     user: CurrentUser,
@@ -127,32 +131,36 @@ def nearby_requests(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    """Active (Pending) requests near a location, for donors to browse."""
+    """Open-capacity requests near a donor."""
     request_service.expire_stale_requests(session)
     stmt = select(BloodRequest).where(
-        BloodRequest.status == RequestStatus.PENDING.value,
+        BloodRequest.status.in_(
+            (
+                RequestStatus.PENDING.value,
+                RequestStatus.PARTIALLY_COMMITTED.value,
+            )
+        ),
         BloodRequest.latitude.isnot(None),
         BloodRequest.longitude.isnot(None),
-        # Your own requests belong in /mine, not in the donor feed.
         BloodRequest.recipient_id != user.id,
     )
     all_requests = session.exec(stmt).all()
 
     results = []
     for req in all_requests:
+        if request_service.has_completed_commitment(session, req.id, user.id):
+            continue
         dist = haversine_distance(latitude, longitude, req.latitude, req.longitude)
         if dist <= radius_km:
             results.append((req, dist))
 
-    results.sort(key=lambda x: x[1])
+    results.sort(key=lambda item: item[1])
     total = len(results)
     page = results[offset : offset + limit]
-
     items = [
         request_service.build_response(session, req, viewer=user, distance_km=dist)
         for req, dist in page
     ]
-
     return PaginatedResponse(
         items=items,
         total=total,
@@ -160,9 +168,6 @@ def nearby_requests(
         offset=offset,
         has_more=(offset + limit) < total,
     )
-
-
-# ── My requests ──────────────────────────────────────────
 
 
 @router.get("/mine", response_model=PaginatedResponse[BloodRequestResponse])
@@ -178,15 +183,16 @@ def my_requests(
         .where(BloodRequest.recipient_id == user.id)
         .order_by(BloodRequest.created_at.desc())
     )
-    count_stmt = select(BloodRequest).where(BloodRequest.recipient_id == user.id)
-    total = len(session.exec(count_stmt).all())
-
+    total = len(
+        session.exec(
+            select(BloodRequest).where(BloodRequest.recipient_id == user.id)
+        ).all()
+    )
     items_raw = session.exec(stmt.offset(offset).limit(limit)).all()
     items = [
         request_service.build_response(session, req, viewer=user)
         for req in items_raw
     ]
-
     return PaginatedResponse(
         items=items,
         total=total,
@@ -196,20 +202,7 @@ def my_requests(
     )
 
 
-# ── Single request detail ────────────────────────────────
-
-
 @router.get("/{request_id}", response_model=BloodRequestResponse)
 def get_request(request_id: int, user: CurrentUser, session: DbSession):
-    """
-    Detail view for one request.
-
-    Visible to the recipient and the accepting donor at any status; visible to
-    any other authenticated user only while the request is Pending or Accepted
-    (donors reach it from the nearby feed or a push notification). Anything
-    else — including a request that doesn't exist — returns 404 so IDs can't be
-    enumerated. The donor's name and phone are only ever returned to the
-    recipient and to the donor themselves.
-    """
     blood_request = request_service.get_request_for_user(session, request_id, user)
     return request_service.build_response(session, blood_request, viewer=user)

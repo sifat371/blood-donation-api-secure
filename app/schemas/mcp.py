@@ -32,7 +32,9 @@ class FindDonorsArgs(ToolArgs):
 class CreateBloodRequestArgs(ToolArgs):
     patient_name: str = Field(min_length=1, max_length=120)
     blood_group: BloodGroup
-    units: int = Field(default=MIN_REQUEST_UNITS, ge=MIN_REQUEST_UNITS, le=MAX_REQUEST_UNITS)
+    units: int = Field(
+        default=MIN_REQUEST_UNITS, ge=MIN_REQUEST_UNITS, le=MAX_REQUEST_UNITS
+    )
     hospital_name: str = Field(min_length=1, max_length=200)
     hospital_address: Optional[str] = None
     latitude: Optional[float] = Field(default=None, ge=-90, le=90)
@@ -44,7 +46,12 @@ class CreateBloodRequestArgs(ToolArgs):
 
 class UpdateRequestArgs(ToolArgs):
     request_id: int = Field(gt=0)
-    action: Literal["accept", "cancel", "complete"]
+    action: Literal["accept", "withdraw", "cancel", "complete"]
+
+
+class ConfirmDonationArgs(ToolArgs):
+    request_id: int = Field(gt=0)
+    commitment_id: int = Field(gt=0)
 
 
 class NearbyRequestsArgs(ToolArgs):
@@ -66,6 +73,7 @@ TOOL_ARG_MODELS: dict[str, type[ToolArgs]] = {
     "FindDonors": FindDonorsArgs,
     "CreateBloodRequest": CreateBloodRequestArgs,
     "UpdateRequest": UpdateRequestArgs,
+    "ConfirmDonation": ConfirmDonationArgs,
     "GetDonationHistory": EmptyArgs,
     "CheckEligibility": EmptyArgs,
     "GetNearbyRequests": NearbyRequestsArgs,

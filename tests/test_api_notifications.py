@@ -218,10 +218,15 @@ def test_accepting_a_request_notifies_the_requester_with_a_deep_link(
 
 def test_completing_a_request_notifies_the_donor(recipient_client, donor_client):
     request_id = recipient_client.post(
-        f"{API}/blood-requests", json=valid_request_payload()
+        f"{API}/blood-requests", json=valid_request_payload(units=1)
     ).json()["id"]
     donor_client.post(f"{API}/blood-requests/{request_id}/accept")
-    assert recipient_client.post(f"{API}/blood-requests/{request_id}/complete").status_code == 200
+    commitment_id = recipient_client.get(
+        f"{API}/blood-requests/{request_id}/commitments"
+    ).json()[0]["id"]
+    assert recipient_client.post(
+        f"{API}/blood-requests/{request_id}/commitments/{commitment_id}/confirm"
+    ).status_code == 200
 
     donor_alerts = donor_client.get(f"{API}/notifications").json()["items"]
     completed = [
@@ -229,7 +234,6 @@ def test_completing_a_request_notifies_the_donor(recipient_client, donor_client)
     ]
     assert completed, donor_alerts
     assert json.loads(completed[0]["data"])["request_id"] == request_id
-
 
 def test_cancelling_an_accepted_request_notifies_the_donor(recipient_client, donor_client):
     """

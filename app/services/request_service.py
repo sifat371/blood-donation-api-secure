@@ -1,25 +1,33 @@
-"""Blood-request lifecycle service.
+"""Blood-request lifecycle and privacy service.
 
-REST and MCP entry points share these rules so authorisation, expiry,
-transitions, notifications and audit logging cannot drift apart.
+P2 keeps BloodRequest as the parent aggregate and stores donor participation in
+DonationCommitment rows. REST and MCP entry points use this module so expiry,
+visibility, cancellation, compatibility routes and donor fan-out stay aligned.
 """
 
 from typing import Optional
 
 from fastapi import HTTPException, status
-from sqlalchemy import update
 from sqlmodel import Session, select
 
 from app.core.time import business_today, utc_now
 from app.db.models import (
     BloodRequest,
-    DonationHistory,
+    CommitmentStatus,
+    DonationCommitment,
     NotificationType,
     RequestStatus,
     User,
 )
-from app.schemas.blood_request import BloodRequestResponse
+from app.schemas.blood_request import BloodRequestResponse, CommitmentResponse
 from app.services.auth_service import audit_log
+from app.services.commitment_service import (
+    commitment_counts,
+    commit_to_request,
+    confirm_commitment,
+    recalculate_request_status,
+    withdraw_commitment,
+)
 from app.services.eligibility import is_blood_compatible, is_eligible
 from app.services.geo import haversine_distance
 from app.services.notifications import create_notification, send_notification_push
@@ -27,45 +35,115 @@ from app.services.notifications import create_notification, send_notification_pu
 NOTIFY_RADIUS_KM = 20
 NOTIFY_MAX_DONORS = 10
 
-_PUBLICLY_VISIBLE_STATUSES = (
+_OPEN_REQUEST_STATUSES = (
     RequestStatus.PENDING.value,
-    RequestStatus.ACCEPTED.value,
+    RequestStatus.PARTIALLY_COMMITTED.value,
+)
+_SECURED_COMMITMENT_STATUSES = (
+    CommitmentStatus.COMMITTED.value,
+    CommitmentStatus.COMPLETED.value,
 )
 
 
-# ── Expiry ────────────────────────────────────────────────
+# ── Commitment helpers ───────────────────────────────────
+
+
+def _commitments_for_request(session: Session, request_id: int) -> list[DonationCommitment]:
+    return list(
+        session.exec(
+            select(DonationCommitment)
+            .where(DonationCommitment.request_id == request_id)
+            .order_by(DonationCommitment.id)
+        ).all()
+    )
+
+
+def _viewer_commitment(
+    session: Session, request_id: int, user_id: Optional[int]
+) -> Optional[DonationCommitment]:
+    if user_id is None:
+        return None
+    return session.exec(
+        select(DonationCommitment).where(
+            DonationCommitment.request_id == request_id,
+            DonationCommitment.donor_id == user_id,
+        )
+    ).first()
+
+
+def has_completed_commitment(session: Session, request_id: int, user_id: int) -> bool:
+    return (
+        session.exec(
+            select(DonationCommitment.id).where(
+                DonationCommitment.request_id == request_id,
+                DonationCommitment.donor_id == user_id,
+                DonationCommitment.status == CommitmentStatus.COMPLETED.value,
+            )
+        ).first()
+        is not None
+    )
+
+
+# ── Expiry ───────────────────────────────────────────────
+
+
+def _expire_request_in_transaction(
+    session: Session, blood_request: BloodRequest
+) -> list[DonationCommitment]:
+    now = utc_now()
+    blood_request.status = RequestStatus.EXPIRED.value
+    blood_request.updated_at = now
+    session.add(blood_request)
+
+    cancelled: list[DonationCommitment] = []
+    for commitment in _commitments_for_request(session, blood_request.id):
+        if commitment.status != CommitmentStatus.COMMITTED.value:
+            continue
+        commitment.status = CommitmentStatus.CANCELLED.value
+        commitment.slot_number = None
+        commitment.cancelled_at = now
+        commitment.updated_at = now
+        session.add(commitment)
+        cancelled.append(commitment)
+    return cancelled
 
 
 def expire_stale_requests(session: Session, *, commit: bool = True) -> int:
-    """Mark every overdue Pending request as Expired.
-
-    Only Pending requests expire automatically. Once a donor has accepted a
-    request, the recipient must explicitly complete or cancel it.
-    """
-    result = session.execute(
-        update(BloodRequest)
-        .where(
-            BloodRequest.status == RequestStatus.PENDING.value,
+    stale = session.exec(
+        select(BloodRequest).where(
+            BloodRequest.status.in_(_OPEN_REQUEST_STATUSES),
             BloodRequest.needed_date < business_today(),
         )
-        .values(status=RequestStatus.EXPIRED.value, updated_at=utc_now())
-    )
-    changed = int(result.rowcount or 0)
-    if changed and commit:
-        session.commit()
-    return changed
+    ).all()
+
+    expired: list[BloodRequest] = []
+    for blood_request in stale:
+        # Once any unit is secured, the donor/recipient arrangement remains
+        # active even after the original needed date. Only an entirely
+        # unsecured overdue request may auto-expire; secured requests require
+        # explicit completion/cancellation/withdrawal actions.
+        if commitment_counts(session, blood_request.id).secured > 0:
+            continue
+        _expire_request_in_transaction(session, blood_request)
+        expired.append(blood_request)
+
+    if expired:
+        if commit:
+            session.commit()
+        else:
+            session.flush()
+    return len(expired)
 
 
 def expire_request_if_stale(
     session: Session, blood_request: BloodRequest, *, commit: bool = True
 ) -> bool:
     if (
-        blood_request.status == RequestStatus.PENDING.value
+        blood_request.status in _OPEN_REQUEST_STATUSES
         and blood_request.needed_date < business_today()
+        and commitment_counts(session, blood_request.id).secured == 0
     ):
-        blood_request.status = RequestStatus.EXPIRED.value
-        blood_request.updated_at = utc_now()
-        session.add(blood_request)
+        _expire_request_in_transaction(session, blood_request)
         if commit:
             session.commit()
             session.refresh(blood_request)
@@ -88,14 +166,11 @@ def get_request_for_user(
     expire_request_if_stale(session, blood_request)
 
     is_recipient = blood_request.recipient_id == user.id
-    is_accepted_donor = (
-        blood_request.accepted_by is not None
-        and blood_request.accepted_by == user.id
-    )
+    viewer_commitment = _viewer_commitment(session, request_id, user.id)
     if (
         not is_recipient
-        and not is_accepted_donor
-        and blood_request.status not in _PUBLICLY_VISIBLE_STATUSES
+        and viewer_commitment is None
+        and blood_request.status not in _OPEN_REQUEST_STATUSES
     ):
         raise HTTPException(status_code=404, detail="Request not found")
 
@@ -109,15 +184,26 @@ def build_response(
     distance_km: Optional[float] = None,
 ) -> BloodRequestResponse:
     resp = BloodRequestResponse.model_validate(blood_request)
+    counts = commitment_counts(session, blood_request.id)
+    commitments = _commitments_for_request(session, blood_request.id)
+
+    resp.units_required = blood_request.units
+    resp.units_committed = counts.committed
+    resp.units_completed = counts.completed
+    resp.remaining_units = max(blood_request.units - counts.secured, 0)
+    resp.legacy_completion_incomplete = blood_request.legacy_completion_incomplete
 
     viewer_id = viewer.id if viewer else None
     is_recipient = viewer_id == blood_request.recipient_id
-    is_accepted_donor = (
-        viewer_id is not None
-        and blood_request.accepted_by is not None
-        and viewer_id == blood_request.accepted_by
+    viewer_commitment = _viewer_commitment(session, blood_request.id, viewer_id)
+    if viewer_commitment is not None:
+        resp.my_commitment_status = viewer_commitment.status
+
+    is_secured_donor = bool(
+        viewer_commitment
+        and viewer_commitment.status in _SECURED_COMMITMENT_STATUSES
     )
-    may_see_private = is_recipient or is_accepted_donor
+    may_see_private = is_recipient or is_secured_donor
 
     recipient = session.get(User, blood_request.recipient_id)
     if recipient and may_see_private:
@@ -132,13 +218,31 @@ def build_response(
         resp.contact_number = None
         resp.notes = None
         resp.recipient_name = None
-        resp.accepted_by = None
 
-    if blood_request.accepted_by and may_see_private:
-        donor = session.get(User, blood_request.accepted_by)
-        if donor:
+    # Deprecated P1 singular-donor fields remain only when exactly one secured
+    # commitment is visible to this viewer. Multiple donors are never collapsed
+    # into a misleading singular identity.
+    visible_commitments: list[DonationCommitment] = []
+    if is_recipient:
+        visible_commitments = [
+            item
+            for item in commitments
+            if item.status in _SECURED_COMMITMENT_STATUSES
+        ]
+    elif is_secured_donor and viewer_commitment is not None:
+        visible_commitments = [viewer_commitment]
+
+    if len(visible_commitments) == 1:
+        donor_commitment = visible_commitments[0]
+        donor = session.get(User, donor_commitment.donor_id)
+        resp.accepted_by = donor_commitment.donor_id
+        if donor is not None:
             resp.donor_name = donor.name
             resp.donor_phone = donor.phone
+    else:
+        resp.accepted_by = None
+        resp.donor_name = None
+        resp.donor_phone = None
 
     if distance_km is None and viewer is not None:
         distance_km = _distance_between(viewer, blood_request)
@@ -146,6 +250,38 @@ def build_response(
         resp.distance_km = round(distance_km, 2)
 
     return resp
+
+
+def list_commitments_for_user(
+    session: Session, request_id: int, user: User
+) -> list[CommitmentResponse]:
+    blood_request = session.get(BloodRequest, request_id)
+    if blood_request is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    expire_request_if_stale(session, blood_request)
+
+    all_commitments = _commitments_for_request(session, request_id)
+    if blood_request.recipient_id == user.id:
+        visible = [
+            item
+            for item in all_commitments
+            if item.status in _SECURED_COMMITMENT_STATUSES
+        ]
+    else:
+        visible = [item for item in all_commitments if item.donor_id == user.id]
+        if not visible:
+            raise HTTPException(status_code=404, detail="Request not found")
+
+    output: list[CommitmentResponse] = []
+    for commitment in visible:
+        item = CommitmentResponse.model_validate(commitment)
+        item.donor_id = commitment.donor_id
+        donor = session.get(User, commitment.donor_id)
+        if donor is not None:
+            item.donor_name = donor.name
+            item.donor_phone = donor.phone
+        output.append(item)
+    return output
 
 
 def _distance_between(user: User, blood_request: BloodRequest) -> Optional[float]:
@@ -164,130 +300,16 @@ def _distance_between(user: User, blood_request: BloodRequest) -> Optional[float
     )
 
 
-# ── Transitions ──────────────────────────────────────────
-
-
-def _claim_pending_request(
-    session: Session,
-    request_id: int,
-    donor_id: int,
-    updated_at,
-) -> bool:
-    """Atomically claim a still-pending, still-unclaimed request."""
-    result = session.execute(
-        update(BloodRequest)
-        .where(
-            BloodRequest.id == request_id,
-            BloodRequest.status == RequestStatus.PENDING.value,
-            BloodRequest.accepted_by.is_(None),
-        )
-        .values(
-            accepted_by=donor_id,
-            status=RequestStatus.ACCEPTED.value,
-            updated_at=updated_at,
-        )
-    )
-    return int(result.rowcount or 0) == 1
+# ── Lifecycle compatibility + cancellation ──────────────
 
 
 def accept_request(session: Session, request_id: int, user: User) -> BloodRequest:
-    """A donor atomically claims a pending request."""
-    blood_request = session.get(BloodRequest, request_id)
-    if blood_request is None:
-        raise HTTPException(status_code=404, detail="Request not found")
-
-    if expire_request_if_stale(session, blood_request):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot accept an expired request",
-        )
-
-    if blood_request.recipient_id == user.id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot accept your own request",
-        )
-    if blood_request.status != RequestStatus.PENDING.value:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot accept a request with status '{blood_request.status}'",
-        )
-    if not user.blood_group or not user.phone:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Complete your donor profile before accepting a request",
-        )
-    if not user.is_available:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="You are not currently available to donate",
-        )
-    if not is_eligible(user):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="You are not currently eligible to donate based on your recorded donation history",
-        )
-    if not is_blood_compatible(user.blood_group, blood_request.blood_group):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Your blood group is not compatible with this request",
-        )
-
-    distance = _distance_between(user, blood_request)
-    distance_km = round(distance, 2) if distance is not None else None
-    notification = None
-
-    try:
-        if not _claim_pending_request(session, request_id, user.id, utc_now()):
-            session.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Request was already accepted or is no longer pending",
-            )
-
-        session.expire(blood_request)
-        session.refresh(blood_request)
-
-        audit_log(
-            session,
-            user.id,
-            "blood_request_accepted",
-            "blood_request",
-            str(blood_request.id),
-            commit=False,
-        )
-        notification = create_notification(
-            session,
-            blood_request.recipient_id,
-            NotificationType.ACCEPTED_REQUEST,
-            "Request Accepted!",
-            f"{user.name} has accepted your blood request. "
-            f"Phone: {user.phone or 'N/A'}. "
-            f"{'Distance: ' + str(distance_km) + ' km' if distance_km else ''}",
-            data={
-                "request_id": blood_request.id,
-                "donor_id": user.id,
-                "donor_name": user.name,
-                "donor_phone": user.phone,
-                "distance_km": distance_km,
-            },
-            send_push=False,
-            commit=False,
-        )
-        session.commit()
-        session.refresh(blood_request)
-    except HTTPException:
-        raise
-    except Exception:
-        session.rollback()
-        raise
-
-    if notification is not None:
-        send_notification_push(session, notification)
-    return blood_request
+    """P1-compatible route name: secure one donor commitment/unit."""
+    return commit_to_request(session, request_id, user)
 
 
 def complete_request(session: Session, request_id: int, user: User) -> BloodRequest:
+    """Compatibility route; individual donations are confirmed by commitment."""
     blood_request = session.get(BloodRequest, request_id)
     if blood_request is None:
         raise HTTPException(status_code=404, detail="Request not found")
@@ -296,65 +318,36 @@ def complete_request(session: Session, request_id: int, user: User) -> BloodRequ
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the recipient can mark a request as completed",
         )
-    if blood_request.status != RequestStatus.ACCEPTED.value:
+
+    if (
+        blood_request.status == RequestStatus.COMPLETED.value
+        and blood_request.legacy_completion_incomplete
+    ):
+        return blood_request
+
+    counts = commitment_counts(session, request_id)
+    if counts.completed != blood_request.units:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot complete a request with status '{blood_request.status}'",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Confirm every donated unit before completing the request",
         )
 
-    blood_request.status = RequestStatus.COMPLETED.value
-    blood_request.updated_at = utc_now()
-    session.add(blood_request)
-
-    donor = None
-    notification = None
-    donation_date = business_today()
-    if blood_request.accepted_by:
-        session.add(
-            DonationHistory(
-                donor_id=blood_request.accepted_by,
-                request_id=blood_request.id,
-                date=donation_date,
-                recipient=blood_request.patient_name,
-                hospital=blood_request.hospital_name,
-                blood_group=blood_request.blood_group,
-                status="Completed",
-            )
-        )
-        donor = session.get(User, blood_request.accepted_by)
-        if donor:
-            donor.last_donation_date = donation_date
-            session.add(donor)
-
-    try:
-        audit_log(
-            session,
-            user.id,
-            "blood_request_completed",
-            "blood_request",
-            str(blood_request.id),
-            commit=False,
-        )
-        if donor:
-            notification = create_notification(
+    if blood_request.status != RequestStatus.COMPLETED.value:
+        try:
+            recalculate_request_status(session, blood_request)
+            audit_log(
                 session,
-                donor.id,
-                NotificationType.REQUEST_COMPLETED,
-                "Donation Confirmed!",
-                f"Your donation to {blood_request.patient_name} at "
-                f"{blood_request.hospital_name} has been confirmed. Thank you!",
-                data={"request_id": blood_request.id},
-                send_push=False,
+                user.id,
+                "blood_request_completed",
+                "blood_request",
+                str(blood_request.id),
                 commit=False,
             )
-        session.commit()
-        session.refresh(blood_request)
-    except Exception:
-        session.rollback()
-        raise
-
-    if notification is not None:
-        send_notification_push(session, notification)
+            session.commit()
+            session.refresh(blood_request)
+        except Exception:
+            session.rollback()
+            raise
     return blood_request
 
 
@@ -380,13 +373,37 @@ def cancel_request(session: Session, request_id: int, user: User) -> BloodReques
             detail=f"Cannot cancel a request with status '{blood_request.status}'",
         )
 
-    previously_accepted_by = blood_request.accepted_by
-    blood_request.status = RequestStatus.CANCELLED.value
-    blood_request.updated_at = utc_now()
-    session.add(blood_request)
-
-    notification = None
+    notifications = []
     try:
+        now = utc_now()
+        blood_request.status = RequestStatus.CANCELLED.value
+        blood_request.updated_at = now
+        session.add(blood_request)
+
+        for commitment in _commitments_for_request(session, request_id):
+            if commitment.status != CommitmentStatus.COMMITTED.value:
+                continue
+            commitment.status = CommitmentStatus.CANCELLED.value
+            commitment.slot_number = None
+            commitment.cancelled_at = now
+            commitment.updated_at = now
+            session.add(commitment)
+            notification = create_notification(
+                session,
+                commitment.donor_id,
+                NotificationType.CANCELLED_REQUEST,
+                "Request Cancelled",
+                f"The blood request for {blood_request.patient_name} at "
+                f"{blood_request.hospital_name} has been cancelled.",
+                data={
+                    "request_id": blood_request.id,
+                    "commitment_id": commitment.id,
+                },
+                send_push=False,
+                commit=False,
+            )
+            notifications.append(notification)
+
         audit_log(
             session,
             user.id,
@@ -395,25 +412,13 @@ def cancel_request(session: Session, request_id: int, user: User) -> BloodReques
             str(blood_request.id),
             commit=False,
         )
-        if previously_accepted_by:
-            notification = create_notification(
-                session,
-                previously_accepted_by,
-                NotificationType.CANCELLED_REQUEST,
-                "Request Cancelled",
-                f"The blood request for {blood_request.patient_name} at "
-                f"{blood_request.hospital_name} has been cancelled.",
-                data={"request_id": blood_request.id},
-                send_push=False,
-                commit=False,
-            )
         session.commit()
         session.refresh(blood_request)
     except Exception:
         session.rollback()
         raise
 
-    if notification is not None:
+    for notification in notifications:
         send_notification_push(session, notification)
     return blood_request
 
@@ -424,13 +429,12 @@ def cancel_request(session: Session, request_id: int, user: User) -> BloodReques
 def notify_nearby_donors(session: Session, blood_request: BloodRequest) -> None:
     if expire_request_if_stale(session, blood_request):
         return
-    if blood_request.status != RequestStatus.PENDING.value:
+    if blood_request.status not in _OPEN_REQUEST_STATUSES:
         return
     if blood_request.latitude is None or blood_request.longitude is None:
         return
 
     stmt = select(User).where(
-        User.blood_group == blood_request.blood_group,
         User.is_available == True,  # noqa: E712
         User.latitude.isnot(None),
         User.longitude.isnot(None),
@@ -438,8 +442,17 @@ def notify_nearby_donors(session: Session, blood_request: BloodRequest) -> None:
     )
     candidates = session.exec(stmt).all()
 
+    existing_donor_ids = {
+        item.donor_id for item in _commitments_for_request(session, blood_request.id)
+    }
     candidates_with_dist = []
     for donor in candidates:
+        if donor.id in existing_donor_ids:
+            continue
+        if not donor.blood_group or not is_blood_compatible(
+            donor.blood_group, blood_request.blood_group
+        ):
+            continue
         if not is_eligible(donor):
             continue
         dist = haversine_distance(

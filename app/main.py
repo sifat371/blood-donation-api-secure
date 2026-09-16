@@ -14,14 +14,15 @@ from slowapi.util import get_remote_address
 
 from app.core.config import settings, validate_runtime_settings
 from app.core.firebase import init_firebase, is_fcm_available
-from app.db.database import create_db_and_tables
-from app.db.migrations import run_migrations
+from app.db.database import engine
+from app.db.schema_version import assert_schema_at_head
 
-
-# Import all model classes so SQLModel sees them at table-creation time
+# Import all model classes so SQLModel metadata is complete for application and
+# migration tooling. Startup itself never creates or alters these tables.
 from app.db.models import (  # noqa: F401
     User,
     BloodRequest,
+    DonationCommitment,
     DonationHistory,
     Notification,
     RefreshToken,
@@ -51,14 +52,14 @@ limiter = Limiter(key_func=get_remote_address)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_runtime_settings()
-    create_db_and_tables()
-    # create_all adds missing tables but never missing columns, so a database
-    # created by an earlier version needs the additive migrations too.
-    run_migrations()
+    # Alembic is the sole schema owner. The API fails closed on an unversioned
+    # or behind database instead of performing implicit DDL during startup.
+    assert_schema_at_head(engine)
     # Best-effort: a missing/invalid service account disables push but must
-    # never stop the API from starting.
+    # never stop the API from starting once the database is valid.
     init_firebase()
     yield
+
 
 # ── App ──────────────────────────────────────────────────
 

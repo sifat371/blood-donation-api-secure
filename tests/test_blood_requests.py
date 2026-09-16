@@ -92,7 +92,10 @@ def test_create_blood_request(session, sample_user):
 
 
 def test_blood_request_lifecycle(session, sample_user, donor_user):
-    # Create
+    from sqlmodel import select
+    from app.db.models import DonationCommitment
+    from app.services.commitment_service import commit_to_request, confirm_commitment
+
     req = BloodRequest(
         recipient_id=sample_user.id,
         patient_name="Lifecycle Patient",
@@ -106,22 +109,18 @@ def test_blood_request_lifecycle(session, sample_user, donor_user):
     session.add(req)
     session.commit()
     session.refresh(req)
-    assert req.status == "Pending"
+    assert req.status == RequestStatus.PENDING.value
 
-    # Accept
-    req.accepted_by = donor_user.id
-    req.status = RequestStatus.ACCEPTED.value
-    session.commit()
+    commit_to_request(session, req.id, donor_user)
     session.refresh(req)
-    assert req.status == "Accepted"
-    assert req.accepted_by == donor_user.id
+    assert req.status == RequestStatus.FULLY_COMMITTED.value
+    commitment = session.exec(
+        select(DonationCommitment).where(DonationCommitment.request_id == req.id)
+    ).one()
 
-    # Complete
-    req.status = RequestStatus.COMPLETED.value
-    session.commit()
+    confirm_commitment(session, req.id, commitment.id, sample_user)
     session.refresh(req)
-    assert req.status == "Completed"
-
+    assert req.status == RequestStatus.COMPLETED.value
 
 def test_blood_request_cancel(session, sample_user):
     req = BloodRequest(
@@ -143,14 +142,14 @@ def test_blood_request_cancel(session, sample_user):
     assert req.status == "Cancelled"
 
 
-def test_pending_request_claim_is_compare_and_set(session, sample_user, donor_user):
-    from app.core.time import business_today, utc_now
-    from app.db.models import BloodRequest, RequestStatus
-    from app.services.request_service import _claim_pending_request
+def test_commitment_uses_one_database_unit_slot(session, sample_user, donor_user):
+    from sqlmodel import select
+    from app.db.models import DonationCommitment
+    from app.services.commitment_service import commit_to_request
 
     req = BloodRequest(
         recipient_id=sample_user.id,
-        patient_name="Atomic Claim",
+        patient_name="Atomic Slot",
         blood_group="O+",
         units=1,
         hospital_name="Test Hospital",
@@ -162,16 +161,17 @@ def test_pending_request_claim_is_compare_and_set(session, sample_user, donor_us
     session.commit()
     session.refresh(req)
 
-    assert _claim_pending_request(session, req.id, donor_user.id, utc_now()) is True
-    assert _claim_pending_request(session, req.id, donor_user.id, utc_now()) is False
-    session.rollback()
-
+    commit_to_request(session, req.id, donor_user)
+    commit_to_request(session, req.id, donor_user)
+    commitments = session.exec(
+        select(DonationCommitment).where(DonationCommitment.request_id == req.id)
+    ).all()
+    assert len(commitments) == 1
+    assert commitments[0].slot_number == 1
 
 def test_accept_lifecycle_uses_one_database_commit(
     session, sample_user, donor_user, monkeypatch
 ):
-    from app.core.time import business_today
-    from app.db.models import BloodRequest, RequestStatus
     from app.services.request_service import accept_request
 
     req = BloodRequest(
@@ -198,9 +198,8 @@ def test_accept_lifecycle_uses_one_database_commit(
 
     monkeypatch.setattr(session, "commit", counting_commit)
     accepted = accept_request(session, req.id, donor_user)
-    assert accepted.status == RequestStatus.ACCEPTED.value
+    assert accepted.status == RequestStatus.FULLY_COMMITTED.value
     assert commits == 1
-
 
 def test_expired_request_never_fans_out_notifications(
     session, sample_user, donor_user
