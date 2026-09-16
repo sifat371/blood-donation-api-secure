@@ -23,7 +23,7 @@ class BloodGroup(str, Enum):
 
 class RequestStatus(str, Enum):
     PENDING = "Pending"
-    # Legacy compatibility only. New P2 transitions never produce Accepted.
+    # Migration input compatibility only. P2 runtime never writes Accepted.
     ACCEPTED = "Accepted"
     PARTIALLY_COMMITTED = "Partially Committed"
     FULLY_COMMITTED = "Fully Committed"
@@ -114,9 +114,6 @@ class BloodRequest(SQLModel, table=True):
     contact_number: str
     notes: Optional[str] = Field(default=None, sa_column=Column(Text))
     status: str = Field(default=RequestStatus.PENDING.value)
-    # Temporary P1 API compatibility while Task 5 moves all readers to
-    # DonationCommitment. Alembic 0002 already removes this physical column.
-    accepted_by: Optional[int] = Field(default=None, foreign_key="users.id")
     legacy_completion_incomplete: bool = Field(default=False)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
