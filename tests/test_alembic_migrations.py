@@ -206,15 +206,15 @@ def test_multi_donor_revision_preserves_and_transforms_legacy_request_state(tmp_
     assert "commitment_id" in history_columns
 
     with engine.connect() as conn:
-        statuses = dict(conn.execute(text("SELECT id, status FROM blood_requests")))
+        statuses = dict(conn.execute(text("SELECT id, status FROM blood_requests")).all())
         legacy_flags = dict(
-            conn.execute(text("SELECT id, legacy_completion_incomplete FROM blood_requests"))
+            conn.execute(text("SELECT id, legacy_completion_incomplete FROM blood_requests")).all()
         )
         commitments = {
             (request_id, donor_id): (commitment_id, status)
             for commitment_id, request_id, donor_id, status in conn.execute(
                 text("SELECT id, request_id, donor_id, status FROM donation_commitments")
-            )
+            ).all()
         }
 
         assert statuses[101] == "Pending"
@@ -236,7 +236,7 @@ def test_multi_donor_revision_preserves_and_transforms_legacy_request_state(tmp_
         assert commitments[(107, 7)][1] == "Cancelled"
 
         history_links = dict(
-            conn.execute(text("SELECT request_id, commitment_id FROM donation_history"))
+            conn.execute(text("SELECT request_id, commitment_id FROM donation_history")).all()
         )
         assert history_links[104] == commitments[(104, 4)][0]
         assert history_links[105] == commitments[(105, 5)][0]
