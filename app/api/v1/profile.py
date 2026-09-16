@@ -1,11 +1,12 @@
 """
 Profile endpoints (§2.3)
 
-GET   /profile/me               — current user profile
-PATCH /profile/me               — update profile fields
-POST  /profile/complete         — complete profile after first sign-in
-POST  /profile/fcm-token        — create/update FCM token for current user
-GET   /profile/donation-history — paginated donation history
+GET    /profile/me                    — current user profile
+PATCH  /profile/me                    — update profile fields
+POST   /profile/complete              — complete profile after first sign-in
+POST   /profile/fcm-token             — create/update one FCM installation
+DELETE /profile/fcm-token/{device_id} — unregister one caller-owned installation
+GET    /profile/donation-history      — paginated donation history
 """
 
 from fastapi import APIRouter, HTTPException, status
@@ -13,11 +14,12 @@ from sqlmodel import select
 
 from app.core.deps import CurrentUser, DbSession
 from app.core.time import utc_now
-from app.db.models import DonationHistory, FCMToken
+from app.db.models import DonationHistory
 from app.schemas.user import UserResponse, ProfileUpdate, ProfileComplete
 from app.schemas.donation_history import DonationHistoryResponse
 from app.schemas.common import PaginatedResponse
 from app.schemas.notification import FCMTokenUpsertRequest
+from app.services import device_service
 
 router = APIRouter(prefix="/profile", tags=["Profile"])
 
@@ -72,46 +74,28 @@ def complete_profile(body: ProfileComplete, user: CurrentUser, session: DbSessio
 
 
 @router.post("/fcm-token")
-def register_fcm_token(body: FCMTokenUpsertRequest, user: CurrentUser, session: DbSession):
-    """Create or update the current user's FCM token."""
-    existing_for_user = session.exec(
-        select(FCMToken).where(FCMToken.user_id == user.id)
-    ).first()
-
-    if existing_for_user:
-        existing_for_user.token = body.fcm_token
-        if body.device_info:
-            existing_for_user.device_info = body.device_info
-        existing_for_user.created_at = utc_now()
-        session.add(existing_for_user)
-        session.commit()
-        session.refresh(existing_for_user)
-        return {"message": "FCM token updated successfully."}
-
-    existing_for_token = session.exec(
-        select(FCMToken).where(FCMToken.token == body.fcm_token)
-    ).first()
-
-    if existing_for_token:
-        existing_for_token.user_id = user.id
-        if body.device_info:
-            existing_for_token.device_info = body.device_info
-        existing_for_token.created_at = utc_now()
-        session.add(existing_for_token)
-        session.commit()
-        session.refresh(existing_for_token)
-        return {"message": "FCM token updated successfully."}
-
-    new_token = FCMToken(
-        user_id=user.id,
-        token=body.fcm_token,
-        device_info=body.device_info or "android",
+def register_fcm_token(
+    body: FCMTokenUpsertRequest,
+    user: CurrentUser,
+    session: DbSession,
+):
+    """Create or update one authenticated user's app installation."""
+    device_service.register_device(
+        session,
+        user.id,
+        body.device_id,
+        body.fcm_token,
+        body.device_info,
     )
-    session.add(new_token)
-    session.commit()
-    session.refresh(new_token)
+    return {"message": "FCM device registered successfully."}
 
-    return {"message": "FCM token registered successfully."}
+
+@router.delete("/fcm-token/{device_id}")
+def unregister_fcm_token(device_id: str, user: CurrentUser, session: DbSession):
+    """Disable one caller-owned installation without exposing other devices."""
+    device_service.unregister_device(session, user.id, device_id)
+    return {"message": "FCM device unregistered successfully."}
+
 
 @router.get("/donation-history", response_model=PaginatedResponse[DonationHistoryResponse])
 def donation_history(
