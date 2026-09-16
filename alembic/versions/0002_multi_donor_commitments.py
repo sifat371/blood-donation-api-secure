@@ -21,6 +21,9 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("request_id", sa.Integer(), nullable=False),
         sa.Column("donor_id", sa.Integer(), nullable=False),
+        # Active/completed commitments own one numbered unit slot. Terminal
+        # withdrawn/cancelled commitments release it by setting it to NULL.
+        sa.Column("slot_number", sa.Integer(), nullable=True),
         sa.Column("status", sa.String(), nullable=False),
         sa.Column("committed_at", sa.DateTime(), nullable=False),
         sa.Column("completed_at", sa.DateTime(), nullable=True),
@@ -28,10 +31,15 @@ def upgrade() -> None:
         sa.Column("cancelled_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.CheckConstraint(
+            "slot_number IS NULL OR slot_number > 0",
+            name="ck_commitment_positive_slot",
+        ),
         sa.ForeignKeyConstraint(["request_id"], ["blood_requests.id"]),
         sa.ForeignKeyConstraint(["donor_id"], ["users.id"]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("request_id", "donor_id", name="uq_commitment_request_donor"),
+        sa.UniqueConstraint("request_id", "slot_number", name="uq_commitment_request_slot"),
     )
     op.create_index(
         "ix_donation_commitments_request_id",
@@ -80,16 +88,13 @@ def upgrade() -> None:
 
     bind = op.get_bind()
 
-    # Preserve every donor relationship that the P1 schema can actually prove.
-    # A historical Accepted row becomes one committed unit. Historical completed
-    # rows become one completed unit. Terminal rows keep the donor relationship
-    # as a cancelled commitment rather than dropping provenance.
     bind.execute(
         sa.text(
             """
             INSERT INTO donation_commitments (
                 request_id,
                 donor_id,
+                slot_number,
                 status,
                 committed_at,
                 completed_at,
@@ -101,6 +106,7 @@ def upgrade() -> None:
             SELECT
                 id,
                 accepted_by,
+                CASE WHEN status IN ('Cancelled', 'Expired') THEN NULL ELSE 1 END,
                 CASE
                     WHEN status = 'Completed' THEN 'Completed'
                     WHEN status IN ('Cancelled', 'Expired') THEN 'Cancelled'
@@ -126,7 +132,6 @@ def upgrade() -> None:
         )
     )
 
-    # Accepted is migration input only. Runtime P2 never writes this state.
     bind.execute(
         sa.text(
             """
@@ -150,8 +155,6 @@ def upgrade() -> None:
         {"true_value": True},
     )
 
-    # Donation-history linkage is safe because the new table has exactly one
-    # row per (request_id, donor_id). Rows without a provable match stay NULL.
     bind.execute(
         sa.text(
             """
@@ -173,8 +176,6 @@ def upgrade() -> None:
         )
     )
 
-    # accepted_by has now been fully transformed. Batch mode keeps this portable
-    # to SQLite, while PostgreSQL uses its native ALTER TABLE behavior.
     with op.batch_alter_table("blood_requests", schema=None) as batch_op:
         batch_op.drop_column("accepted_by")
 
