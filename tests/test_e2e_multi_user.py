@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from app.core.time import business_today
-from app.db.models import BloodGroup
+from app.db.models import BloodGroup, NotificationType
 from app.services.eligibility import ELIGIBILITY_DAYS
 
 from .conftest import valid_request_payload
@@ -101,7 +101,9 @@ def test_full_requester_and_donor_workflow(
     alerts = recipient_client.get(f"{API}/notifications")
     assert alerts.status_code == 200
     accept_alerts = [
-        n for n in alerts.json()["items"] if "accept" in n["title"].lower()
+        n
+        for n in alerts.json()["items"]
+        if n["type"] == NotificationType.ACCEPTED_REQUEST.value
     ]
     assert accept_alerts, alerts.json()
     assert str(request_id) in str(accept_alerts[0]["data"])
@@ -140,6 +142,7 @@ def test_full_requester_and_donor_workflow(
     )
     assert donor_user.id not in [d["id"] for d in donors_after.json()["items"]]
 
+
 def test_a_third_user_cannot_accept_someone_elses_accepted_request(
     recipient_client, donor_client, third_client
 ):
@@ -174,7 +177,6 @@ def test_donor_cannot_cancel_someone_elses_request(recipient_client, donor_clien
     attempt = donor_client.post(f"{API}/blood-requests/{request_id}/cancel")
     assert attempt.status_code == 403, attempt.text
 
-    # And the request is untouched.
     assert (
         recipient_client.get(f"{API}/blood-requests/{request_id}").json()["status"]
         == "Pending"
@@ -208,7 +210,6 @@ def test_notifications_are_scoped_to_the_recipient(
     donor_client.post(f"{API}/blood-requests/{request_id}/accept")
 
     assert recipient_client.get(f"{API}/notifications").json()["total"] >= 1
-    # The uninvolved third account has nothing about this request.
     third_alerts = third_client.get(f"{API}/notifications").json()["items"]
     assert all(str(request_id) not in str(n["data"]) for n in third_alerts)
 
@@ -228,7 +229,6 @@ def test_a_user_cannot_mark_another_users_notification_as_read(
     stolen = donor_client.post(f"{API}/notifications/{notification_id}/read")
     assert stolen.status_code == 404, stolen.text
 
-    # Still unread for its actual owner.
     owner_view = recipient_client.get(f"{API}/notifications").json()["items"]
     assert [n for n in owner_view if n["id"] == notification_id][0]["is_read"] is False
 
@@ -273,8 +273,8 @@ def test_an_unavailable_donor_is_excluded_from_search(
 @pytest.mark.parametrize(
     "days_ago,expected_in_results",
     [
-        (ELIGIBILITY_DAYS - 1, False),  # one day short of the cooldown
-        (ELIGIBILITY_DAYS, True),  # exactly the boundary — eligible again
+        (ELIGIBILITY_DAYS - 1, False),
+        (ELIGIBILITY_DAYS, True),
     ],
 )
 def test_eligibility_boundary_in_donor_search(
