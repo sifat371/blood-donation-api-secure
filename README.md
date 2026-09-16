@@ -1,6 +1,6 @@
 # Blood Donation API — Backend
 
-FastAPI + SQLModel + SQLite. Managed with [uv](https://docs.astral.sh/uv/).
+FastAPI + SQLModel with Alembic-managed SQLite/PostgreSQL schemas. Managed with [uv](https://docs.astral.sh/uv/).
 
 ## Setup
 
@@ -18,9 +18,29 @@ notifications without push).
 
 `.env` and `app/serviceAccount.json` are gitignored. Never commit either.
 
+### Prepare the database
+
+Alembic is the schema owner. For a new SQLite/PostgreSQL database, or an already
+versioned database, run:
+
+```bash
+uv run alembic upgrade head
+```
+
+If you are upgrading an existing unversioned P1 SQLite database, use the guarded
+backup/verification helper instead:
+
+```bash
+uv run python scripts/migrate_existing_db.py
+```
+
+The API refuses to start when the configured database is unversioned or behind
+Alembic head. Startup never runs `create_all()` or implicit schema migrations.
+See `docs/database-migrations.md` for the deployment paths and backup behavior.
+
 ## Run
 
-For the web build or the iOS simulator, the default bind is enough:
+For the web build or the iOS simulator, after the database is at Alembic head:
 
 ```bash
 uv run uvicorn app.main:app --reload
@@ -68,9 +88,10 @@ uv run pytest
 uv run pytest -q tests/test_e2e_multi_user.py
 ```
 
-The suite runs against an in-memory SQLite database and never touches
-`blood_donation.db`. It does not need a running server, network access, Firebase
-credentials or a Gemini key.
+The normal unit/API suite uses isolated test databases and never touches
+`blood_donation.db`. GitHub Actions additionally provisions PostgreSQL 16, runs
+`alembic upgrade head`, and executes the migration/commitment/request regression
+subset against the production-target database configuration.
 
 ## Smoke check a running server
 
@@ -107,9 +128,10 @@ When `ENVIRONMENT=production`, startup fails unless `SECRET_KEY` is non-default,
 `CORS_ORIGINS` is an explicit allow-list, and SMTP delivery is configured. Google
 sign-in is disabled unless `GOOGLE_CLIENT_ID` is configured. Public donor search
 does not expose phone numbers, and active request discovery redacts patient,
-contact, exact-location, and account identifiers until a donor is accepted.
+contact, exact-location, and account identifiers until the donor has an active
+commitment.
 
-Donor acceptance is enforced server-side: the donor must have a complete donor
+Donor commitment is enforced server-side: the donor must have a complete donor
 profile, be available, satisfy the recorded 90-day donation interval, and have a
 red-cell-compatible blood group. Final medical eligibility and transfusion
 compatibility still require screening by qualified healthcare/blood-bank staff.
@@ -117,14 +139,21 @@ compatibility still require screening by qualified healthcare/blood-bank staff.
 ### Time and request expiry
 
 Calendar-day rules use `BUSINESS_TIMEZONE` (default `Asia/Dhaka`). New requests
-may target today or a future date; overdue pending requests are marked `Expired`
-and are no longer shown to donors or eligible for acceptance. Stored application
-timestamps remain UTC for compatibility with the existing database schema.
+may target today or a future date; overdue open requests are marked `Expired`
+and are no longer shown to donors or eligible for new commitments. Stored
+application timestamps remain UTC for database compatibility.
 
 ### Database migration boundary
 
-SQLite remains the supported local/test database. Engine options are now
-dialect-aware, and the legacy startup migration code runs only on SQLite. Before
-a production PostgreSQL deployment, follow `docs/database-migrations.md` and
-introduce a reviewed Alembic migration history rather than relying on `create_all`.
+Alembic is mandatory for both SQLite and PostgreSQL. Deployments must migrate the
+database before starting the API:
 
+```bash
+uv run alembic upgrade head
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Existing unversioned P1 SQLite installations must use
+`uv run python scripts/migrate_existing_db.py` once so the schema is verified,
+backed up, stamped at the P1 baseline, and upgraded safely. The API itself never
+mutates database structure during startup.
