@@ -1,4 +1,4 @@
-"""Pydantic v2 schemas — blood requests."""
+"""Pydantic v2 schemas — blood requests and donor commitments."""
 
 from datetime import date, datetime
 from typing import Optional
@@ -8,17 +8,6 @@ from pydantic import BaseModel, Field, field_validator
 from app.db.models import BloodGroup
 from app.core.time import business_today
 
-# ── Single source of truth for the units business rule ───
-#
-# One blood request covers one patient's immediate need. 1–10 units spans
-# everything from a routine transfusion to major surgery / trauma, and is the
-# bound enforced everywhere: the create schema below, the MCP CreateBloodRequest
-# tool, and the frontend's numeric input.
-#
-# Deliberately NOT enforced on BloodRequestResponse: re-validating business
-# bounds on the way out turns any legacy or out-of-range row into an
-# unhandled ResponseValidationError (HTTP 500) instead of a readable 422 at
-# the input boundary. Response models describe, they don't gate-keep.
 MIN_REQUEST_UNITS = 1
 MAX_REQUEST_UNITS = 10
 
@@ -37,9 +26,6 @@ class BloodRequestCreate(BaseModel):
     contact_number: str = Field(min_length=1, max_length=30)
     notes: Optional[str] = None
 
-    # Validated against the enum, stored as the plain "O+" string. The donor
-    # fan-out matches blood_group by string equality, so an unchecked free-text
-    # group would create a request no donor could ever be notified about.
     @field_validator("needed_date")
     @classmethod
     def needed_date_cannot_be_in_the_past(cls, value: date) -> date:
@@ -50,12 +36,33 @@ class BloodRequestCreate(BaseModel):
     model_config = {"use_enum_values": True}
 
 
+class CommitmentResponse(BaseModel):
+    id: int
+    request_id: int
+    donor_id: Optional[int] = None
+    status: str
+    committed_at: datetime
+    completed_at: Optional[datetime] = None
+    withdrawn_at: Optional[datetime] = None
+    cancelled_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+    donor_name: Optional[str] = None
+    donor_phone: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
 class BloodRequestResponse(BaseModel):
     id: int
     recipient_id: Optional[int] = None
     patient_name: Optional[str] = None
     blood_group: str
     units: int
+    units_required: int = 0
+    units_committed: int = 0
+    units_completed: int = 0
+    remaining_units: Optional[int] = None
     hospital_name: str
     hospital_address: Optional[str] = None
     latitude: Optional[float] = None
@@ -64,14 +71,18 @@ class BloodRequestResponse(BaseModel):
     contact_number: Optional[str] = None
     notes: Optional[str] = None
     status: str
-    accepted_by: Optional[int] = None
-    created_at: datetime
-    updated_at: datetime
+    legacy_completion_incomplete: bool = False
+    my_commitment_status: Optional[str] = None
 
-    # Enriched fields (populated via joins)
-    recipient_name: Optional[str] = None
+    # Deprecated P1 singular-donor compatibility fields. P2 populates these
+    # only when exactly one commitment is visible to the viewer.
+    accepted_by: Optional[int] = None
     donor_name: Optional[str] = None
     donor_phone: Optional[str] = None
+
+    created_at: datetime
+    updated_at: datetime
+    recipient_name: Optional[str] = None
     distance_km: Optional[float] = None
 
     model_config = {"from_attributes": True}
