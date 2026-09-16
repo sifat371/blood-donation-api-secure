@@ -1,6 +1,5 @@
 """P2 database migration contract tests."""
 
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -22,7 +21,7 @@ def _make_unversioned_p1_database(path: Path) -> None:
     """Create a frozen P1 database fixture without relying on current models."""
     url = f"sqlite:///{path}"
     command.upgrade(_config(url), "0001_p1_baseline")
-    now = datetime(2026, 9, 16, 12, 0, 0)
+    now = "2026-09-16 12:00:00"
     engine = create_engine(url)
     with engine.begin() as conn:
         conn.execute(
