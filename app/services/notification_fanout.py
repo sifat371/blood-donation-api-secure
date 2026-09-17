@@ -16,6 +16,7 @@ from app.db.models import (
 from app.services.eligibility import is_blood_compatible, is_eligible
 from app.services.geo import haversine_distance
 from app.services.notifications import create_notification
+from app.services.request_service import expire_request_if_stale
 
 NOTIFY_RADIUS_KM = 20
 NOTIFY_MAX_DONORS = 10
@@ -34,7 +35,14 @@ def materialize_blood_request_created(session: Session, event: OutboxEvent) -> i
         raise ValueError("Malformed blood_request_created outbox payload") from exc
 
     blood_request = session.get(BloodRequest, request_id)
-    if blood_request is None or blood_request.status not in _OPEN_REQUEST_STATUSES:
+    if blood_request is None:
+        return 0
+    # Fan-out may run well after request creation. Reuse the P2 expiry rule in
+    # the same worker-owned transaction so an overdue unsecured request becomes
+    # Expired instead of sending stale donor alerts.
+    if expire_request_if_stale(session, blood_request, commit=False):
+        return 0
+    if blood_request.status not in _OPEN_REQUEST_STATUSES:
         return 0
     if blood_request.latitude is None or blood_request.longitude is None:
         return 0
