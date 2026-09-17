@@ -20,10 +20,6 @@ _OPEN_REQUEST_STATUSES = (
     RequestStatus.PENDING.value,
     RequestStatus.PARTIALLY_COMMITTED.value,
 )
-_ACTIVE_DONOR_COMMITMENT_STATUSES = (
-    CommitmentStatus.COMMITTED.value,
-    CommitmentStatus.COMPLETED.value,
-)
 
 
 def find_compatible_donors(
@@ -89,7 +85,12 @@ def find_acceptable_nearby_requests(
     longitude: float,
     radius_km: float,
 ) -> list[tuple[BloodRequest, float]]:
-    """Return only open nearby requests this donor could currently accept."""
+    """Return nearby requests actionable by this donor.
+
+    A request already committed by this donor remains visible while it still has
+    open capacity so the UI can render the caller's current commitment state.
+    Completed commitments are excluded from discovery.
+    """
     request_service.expire_stale_requests(session)
     if not _donor_ready_for_request_discovery(donor):
         return []
@@ -107,14 +108,14 @@ def find_acceptable_nearby_requests(
             continue
         if commitment_counts(session, blood_request.id).secured >= blood_request.units:
             continue
-        existing = session.exec(
+        completed = session.exec(
             select(DonationCommitment.id).where(
                 DonationCommitment.request_id == blood_request.id,
                 DonationCommitment.donor_id == donor.id,
-                DonationCommitment.status.in_(_ACTIVE_DONOR_COMMITMENT_STATUSES),
+                DonationCommitment.status == CommitmentStatus.COMPLETED.value,
             )
         ).first()
-        if existing is not None:
+        if completed is not None:
             continue
         distance = haversine_distance(
             latitude,
