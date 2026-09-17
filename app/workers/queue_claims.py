@@ -7,6 +7,7 @@ local/test worker only.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy import and_, or_
@@ -19,6 +20,8 @@ from app.db.models import (
     OutboxEvent,
     OutboxStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _lease_seconds(value: int | None) -> int:
@@ -55,6 +58,9 @@ def claim_outbox_events(
         stmt = stmt.with_for_update(skip_locked=True)
 
     rows = list(session.exec(stmt).all())
+    reclaimed = sum(
+        1 for row in rows if row.status == OutboxStatus.PROCESSING.value
+    )
     for row in rows:
         row.status = OutboxStatus.PROCESSING.value
         row.locked_at = now
@@ -62,6 +68,12 @@ def claim_outbox_events(
         row.updated_at = now
         session.add(row)
     session.commit()
+    if reclaimed:
+        logger.warning(
+            "notification_stale_locks_reclaimed queue=outbox worker_id=%s count=%s",
+            worker_id,
+            reclaimed,
+        )
     return [row.id for row in rows]
 
 
@@ -100,6 +112,9 @@ def claim_deliveries(
         stmt = stmt.with_for_update(skip_locked=True)
 
     rows = list(session.exec(stmt).all())
+    reclaimed = sum(
+        1 for row in rows if row.status == DeliveryStatus.PROCESSING.value
+    )
     for row in rows:
         row.status = DeliveryStatus.PROCESSING.value
         row.locked_at = now
@@ -107,4 +122,10 @@ def claim_deliveries(
         row.updated_at = now
         session.add(row)
     session.commit()
+    if reclaimed:
+        logger.warning(
+            "notification_stale_locks_reclaimed queue=delivery worker_id=%s count=%s",
+            worker_id,
+            reclaimed,
+        )
     return [row.id for row in rows]
