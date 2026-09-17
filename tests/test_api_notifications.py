@@ -8,8 +8,6 @@ carries the request id the app deep-links on. A notification the app can't route
 is only marginally better than no notification.
 """
 
-import json
-
 import pytest
 
 from app.db.models import Notification, NotificationType
@@ -186,9 +184,10 @@ def test_marking_read_twice_is_harmless(recipient_client, session, sample_user):
 def test_the_data_payload_survives_the_round_trip(recipient_client, session, sample_user):
     _make(session, sample_user.id, data={"request_id": 42, "type": "new_request"})
 
-    raw = recipient_client.get(f"{API}/notifications").json()["items"][0]["data"]
-    # Stored as a JSON string; the app parses it to find the deep-link target.
-    assert json.loads(raw)["request_id"] == 42
+    data = recipient_client.get(f"{API}/notifications").json()["items"][0]["data"]
+    # The API exposes a structured object so the app can deep-link without
+    # performing a second JSON parse.
+    assert data["request_id"] == 42
 
 
 def test_a_notification_without_a_payload_is_still_valid(recipient_client, session, sample_user):
@@ -212,7 +211,7 @@ def test_accepting_a_request_notifies_the_requester_with_a_deep_link(
     accepted = [n for n in alerts if n["type"] == NotificationType.ACCEPTED_REQUEST.value]
     assert accepted, alerts
     # Without the request id the app can't open anything on tap.
-    assert json.loads(accepted[0]["data"])["request_id"] == request_id
+    assert accepted[0]["data"]["request_id"] == request_id
     assert donor_user.name in accepted[0]["body"]
 
 
@@ -233,7 +232,8 @@ def test_completing_a_request_notifies_the_donor(recipient_client, donor_client)
         n for n in donor_alerts if n["type"] == NotificationType.REQUEST_COMPLETED.value
     ]
     assert completed, donor_alerts
-    assert json.loads(completed[0]["data"])["request_id"] == request_id
+    assert completed[0]["data"]["request_id"] == request_id
+
 
 def test_cancelling_an_accepted_request_notifies_the_donor(recipient_client, donor_client):
     """
@@ -251,7 +251,7 @@ def test_cancelling_an_accepted_request_notifies_the_donor(recipient_client, don
         n for n in donor_alerts if n["type"] == NotificationType.CANCELLED_REQUEST.value
     ]
     assert cancelled, donor_alerts
-    assert json.loads(cancelled[0]["data"])["request_id"] == request_id
+    assert cancelled[0]["data"]["request_id"] == request_id
 
 
 def test_an_uninvolved_account_is_not_notified(

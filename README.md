@@ -113,6 +113,37 @@ Use `POST /api/v1/profile/fcm-token` to register/rotate a token and
 `DELETE /api/v1/profile/fcm-token/{device_id}` on device logout/removal. Multiple
 active installations may coexist for one account.
 
+### Frontend API contract (F0)
+
+F0 aligns the REST and AI/MCP surfaces around one frontend-safe business
+contract:
+
+- `GET /api/v1/donors/search` treats `blood_group` as the recipient/requested
+  group and returns eligible **red-cell-compatible** donors, not exact-group-only
+  matches. Public results still omit phone numbers.
+- `GET /api/v1/blood-requests/nearby` returns only requests compatible with a
+  complete, available, donation-eligible donor. A donor's own existing
+  `Committed` request may remain visible while that request still has open
+  capacity; clients should use `my_commitment_status` to render an Accepted state
+  instead of another Donate action.
+- `GET /api/v1/blood-requests/commitments/mine` is the canonical donor-facing
+  active-donations list. It is paginated and returns the caller's commitment plus
+  the privacy-authorized request details needed to coordinate the donation.
+- `POST /api/v1/blood-requests/{request_id}/commitments/{commitment_id}/release`
+  lets the request recipient release one uncompleted/no-show donor without
+  cancelling other donors or the whole request. Completed donations cannot be
+  released.
+- `POST /api/v1/blood-requests` requires both `latitude` and `longitude`; a
+  locationless request is rejected rather than silently becoming undiscoverable.
+  AI/MCP request creation uses the same validation and durable P3.1 outbox
+  transaction as REST.
+- Notification response `data` is a JSON object or `null`, not a JSON-encoded
+  string. Clients can use fields such as `request_id` directly for deep links.
+
+The server remains authoritative under races: discovery is a convenience filter,
+while acceptance revalidates profile completeness, availability, donation
+eligibility, compatibility and remaining capacity transactionally.
+
 ## Tests
 
 ```bash
@@ -125,9 +156,9 @@ uv run pytest -q tests/test_e2e_multi_user.py
 
 The normal unit/API suite uses isolated test databases and never touches
 `blood_donation.db`. GitHub Actions additionally provisions PostgreSQL 16, runs
-`alembic upgrade head`, and executes migration, request, notification-worker,
-and PostgreSQL concurrency regressions against the production-target database
-configuration.
+`alembic upgrade head`, and executes migration, request, F0 frontend-contract,
+notification-worker, and PostgreSQL concurrency regressions against the
+production-target database configuration.
 
 ## Smoke check a running server
 

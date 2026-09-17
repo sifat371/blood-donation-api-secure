@@ -13,14 +13,7 @@ from pydantic import ValidationError
 from sqlmodel import Session, select
 
 from app.core.time import utc_now
-from app.db.models import (
-    BloodRequest,
-    DonationHistory,
-    Notification,
-    RequestStatus,
-    User,
-    UserLocation,
-)
+from app.db.models import DonationHistory, Notification, User, UserLocation
 from app.schemas.blood_request import BloodRequestCreate, MIN_REQUEST_UNITS
 from app.schemas.mcp import (
     MCP_MAX_RESULTS,
@@ -28,9 +21,12 @@ from app.schemas.mcp import (
     validate_tool_args,
 )
 from app.services import request_service
-from app.services.auth_service import audit_log
+from app.services.discovery_service import (
+    find_acceptable_nearby_requests,
+    find_compatible_donors,
+)
 from app.services.eligibility import days_until_eligible, is_eligible
-from app.services.geo import haversine_distance
+from app.services.request_creation_service import create_blood_request as create_request_record
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +34,9 @@ logger = logging.getLogger(__name__)
 TOOL_DEFINITIONS = [
     {
         "name": "FindDonors",
-        "description": "Find nearest eligible blood donors sorted by distance",
+        "description": "Find nearest eligible compatible blood donors sorted by distance",
         "parameters": {
-            "blood_group": "string (required) — e.g. O+, A-, AB+",
+            "blood_group": "string (required) — recipient/requested group, e.g. O+, A-, AB+",
             "latitude": "float (required)",
             "longitude": "float (required)",
             "radius_km": "float (optional, default 20)",
@@ -58,8 +54,8 @@ TOOL_DEFINITIONS = [
             "units": "int (optional, default 1)",
             "hospital_name": "string (required)",
             "hospital_address": "string (optional)",
-            "latitude": "float (optional)",
-            "longitude": "float (optional)",
+            "latitude": "float (required — hospital/request location)",
+            "longitude": "float (required — hospital/request location)",
             "needed_date": "string (required, YYYY-MM-DD)",
             "contact_number": "string (required)",
             "notes": "string (optional)",
@@ -100,7 +96,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "GetNearbyRequests",
-        "description": "Get blood requests with open donor capacity near a location",
+        "description": "Get nearby requests the current donor can actually accept",
         "parameters": {
             "latitude": "float (required)",
             "longitude": "float (required)",
@@ -133,7 +129,7 @@ TOOL_DEFINITIONS = [
 ]
 
 
-def _request_state(session: Session, req: BloodRequest, user: User) -> dict:
+def _request_state(session: Session, req, user: User) -> dict:
     """Return the non-sensitive P2 lifecycle summary used by MCP mutations."""
     response = request_service.build_response(session, req, viewer=user)
     return {
@@ -159,45 +155,33 @@ def find_donors(
     district: Optional[str] = None,
     upazila: Optional[str] = None,
 ) -> List[dict]:
-    stmt = select(User).where(
-        User.blood_group == blood_group,
-        User.is_available == True,  # noqa: E712
-        User.latitude.isnot(None),
-        User.longitude.isnot(None),
-        User.id != user.id,
+    matches = find_compatible_donors(
+        session,
+        viewer=user,
+        recipient_blood_group=blood_group,
+        latitude=latitude,
+        longitude=longitude,
+        radius_km=radius_km,
+        division=division,
+        district=district,
+        upazila=upazila,
     )
-    if division:
-        stmt = stmt.where(User.division == division)
-    if district:
-        stmt = stmt.where(User.district == district)
-    if upazila:
-        stmt = stmt.where(User.upazila == upazila)
-
-    results = []
-    for donor in session.exec(stmt).all():
-        if not is_eligible(donor):
-            continue
-        dist = haversine_distance(latitude, longitude, donor.latitude, donor.longitude)
-        if dist <= radius_km:
-            results.append(
-                {
-                    "id": donor.id,
-                    "name": donor.name,
-                    "distance_km": round(dist, 2),
-                    "blood_group": donor.blood_group,
-                    "last_donation_date": (
-                        str(donor.last_donation_date)
-                        if donor.last_donation_date
-                        else None
-                    ),
-                    "is_available": donor.is_available,
-                    "division": donor.division,
-                    "district": donor.district,
-                    "upazila": donor.upazila,
-                }
-            )
-    results.sort(key=lambda item: item["distance_km"])
-    return results[:MCP_MAX_RESULTS]
+    return [
+        {
+            "id": donor.id,
+            "name": donor.name,
+            "distance_km": round(distance, 2),
+            "blood_group": donor.blood_group,
+            "last_donation_date": (
+                str(donor.last_donation_date) if donor.last_donation_date else None
+            ),
+            "is_available": donor.is_available,
+            "division": donor.division,
+            "district": donor.district,
+            "upazila": donor.upazila,
+        }
+        for donor, distance in matches[:MCP_MAX_RESULTS]
+    ]
 
 
 def create_blood_request(
@@ -208,10 +192,10 @@ def create_blood_request(
     hospital_name: str,
     needed_date: str,
     contact_number: str,
+    latitude: float,
+    longitude: float,
     units: int = MIN_REQUEST_UNITS,
     hospital_address: Optional[str] = None,
-    latitude: Optional[float] = None,
-    longitude: Optional[float] = None,
     notes: Optional[str] = None,
 ) -> dict:
     try:
@@ -234,42 +218,7 @@ def create_blood_request(
         )
         return {"error": f"Invalid blood request: {problems}"}
 
-    req = BloodRequest(
-        recipient_id=user.id,
-        patient_name=validated.patient_name,
-        blood_group=validated.blood_group,
-        units=validated.units,
-        hospital_name=validated.hospital_name,
-        hospital_address=validated.hospital_address,
-        latitude=validated.latitude,
-        longitude=validated.longitude,
-        needed_date=validated.needed_date,
-        contact_number=validated.contact_number,
-        notes=validated.notes,
-        status=RequestStatus.PENDING.value,
-    )
-    try:
-        session.add(req)
-        session.flush()
-        audit_log(
-            session,
-            user.id,
-            "blood_request_created",
-            "blood_request",
-            str(req.id),
-            commit=False,
-        )
-        session.commit()
-        session.refresh(req)
-    except Exception:
-        session.rollback()
-        raise
-
-    try:
-        request_service.notify_nearby_donors(session, req)
-    except Exception as exc:  # best-effort notification fan-out
-        logger.warning("Donor notification failed for request %s: %s", req.id, exc)
-
+    req = create_request_record(session, user, validated)
     state = _request_state(session, req, user)
     state["message"] = f"Blood request created successfully (ID: {req.id})"
     return state
@@ -368,28 +317,15 @@ def get_nearby_requests(
     longitude: float,
     radius_km: float = 20,
 ) -> List[dict]:
-    request_service.expire_stale_requests(session)
-    requests = session.exec(
-        select(BloodRequest).where(
-            BloodRequest.status.in_(
-                (
-                    RequestStatus.PENDING.value,
-                    RequestStatus.PARTIALLY_COMMITTED.value,
-                )
-            ),
-            BloodRequest.latitude.isnot(None),
-            BloodRequest.longitude.isnot(None),
-            BloodRequest.recipient_id != user.id,
-        )
-    ).all()
-
-    results = []
-    for req in requests:
-        if request_service.has_completed_commitment(session, req.id, user.id):
-            continue
-        dist = haversine_distance(latitude, longitude, req.latitude, req.longitude)
-        if dist > radius_km:
-            continue
+    matches = find_acceptable_nearby_requests(
+        session,
+        donor=user,
+        latitude=latitude,
+        longitude=longitude,
+        radius_km=radius_km,
+    )
+    results: list[dict] = []
+    for req, distance in matches[:MCP_MAX_RESULTS]:
         state = _request_state(session, req, user)
         results.append(
             {
@@ -403,12 +339,11 @@ def get_nearby_requests(
                 "my_commitment_status": state["my_commitment_status"],
                 "hospital_name": req.hospital_name,
                 "needed_date": str(req.needed_date),
-                "distance_km": round(dist, 2),
+                "distance_km": round(distance, 2),
                 "status": req.status,
             }
         )
-    results.sort(key=lambda item: item["distance_km"])
-    return results[:MCP_MAX_RESULTS]
+    return results
 
 
 def update_availability(session: Session, user_id: int, is_available: bool) -> dict:
@@ -541,7 +476,9 @@ def dispatch_tool(
     if not isinstance(tool_args, dict):
         return {"error": "Tool arguments must be an object"}
 
-    safe_args = {key: value for key, value in tool_args.items() if key not in _FORBIDDEN_ARGS}
+    safe_args = {
+        key: value for key, value in tool_args.items() if key not in _FORBIDDEN_ARGS
+    }
     dropped = set(tool_args) - set(safe_args)
     if dropped:
         logger.warning(

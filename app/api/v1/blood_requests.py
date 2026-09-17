@@ -1,8 +1,8 @@
 """Blood request lifecycle endpoints.
 
-P2 preserves the P1 route names while representing donor participation as
-one-unit DonationCommitment rows. The service layer owns authorization,
-privacy, status derivation and transactions so REST and MCP cannot drift.
+Donor participation is represented as one-unit DonationCommitment rows. Service
+layers own authorization, privacy, discovery and transactions so REST and MCP
+share the same business rules.
 """
 
 from fastapi import APIRouter, Query, Request
@@ -11,17 +11,21 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.core.deps import CurrentUser, DbSession
-from app.db.models import BloodRequest, RequestStatus
+from app.db.models import BloodRequest
 from app.schemas.blood_request import (
     BloodRequestCreate,
     BloodRequestResponse,
     CommitmentResponse,
+    DonorCommitmentResponse,
 )
 from app.schemas.common import PaginatedResponse
 from app.services import request_service
-from app.services.geo import haversine_distance
-from app.services.auth_service import audit_log
-from app.services.outbox_service import enqueue_outbox_event
+from app.services.discovery_service import find_acceptable_nearby_requests
+from app.services.frontend_service import (
+    list_active_donor_commitments,
+    release_commitment as release_donor_commitment,
+)
+from app.services.request_creation_service import create_blood_request
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter(prefix="/blood-requests", tags=["Blood Requests"])
@@ -35,45 +39,7 @@ def create_request(
     user: CurrentUser,
     session: DbSession,
 ):
-    blood_request = BloodRequest(
-        recipient_id=user.id,
-        patient_name=body.patient_name,
-        blood_group=body.blood_group,
-        units=body.units,
-        hospital_name=body.hospital_name,
-        hospital_address=body.hospital_address,
-        latitude=body.latitude,
-        longitude=body.longitude,
-        needed_date=body.needed_date,
-        contact_number=body.contact_number,
-        notes=body.notes,
-        status=RequestStatus.PENDING.value,
-    )
-    try:
-        session.add(blood_request)
-        session.flush()
-        audit_log(
-            session,
-            user.id,
-            "blood_request_created",
-            "blood_request",
-            str(blood_request.id),
-            commit=False,
-        )
-        enqueue_outbox_event(
-            session,
-            "blood_request_created",
-            "blood_request",
-            str(blood_request.id),
-            {"request_id": blood_request.id},
-            f"blood_request_created:{blood_request.id}",
-        )
-        session.commit()
-        session.refresh(blood_request)
-    except Exception:
-        session.rollback()
-        raise
-
+    blood_request = create_blood_request(session, user, body)
     return request_service.build_response(session, blood_request, viewer=user)
 
 
@@ -100,6 +66,22 @@ def confirm_commitment(
     session: DbSession,
 ):
     blood_request = request_service.confirm_commitment(
+        session, request_id, commitment_id, user
+    )
+    return request_service.build_response(session, blood_request, viewer=user)
+
+
+@router.post(
+    "/{request_id}/commitments/{commitment_id}/release",
+    response_model=BloodRequestResponse,
+)
+def release_commitment(
+    request_id: int,
+    commitment_id: int,
+    user: CurrentUser,
+    session: DbSession,
+):
+    blood_request = release_donor_commitment(
         session, request_id, commitment_id, user
     )
     return request_service.build_response(session, blood_request, viewer=user)
@@ -136,30 +118,14 @@ def nearby_requests(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    """Open-capacity requests near a donor."""
-    request_service.expire_stale_requests(session)
-    stmt = select(BloodRequest).where(
-        BloodRequest.status.in_(
-            (
-                RequestStatus.PENDING.value,
-                RequestStatus.PARTIALLY_COMMITTED.value,
-            )
-        ),
-        BloodRequest.latitude.isnot(None),
-        BloodRequest.longitude.isnot(None),
-        BloodRequest.recipient_id != user.id,
+    """Nearby requests the authenticated donor could currently accept."""
+    results = find_acceptable_nearby_requests(
+        session,
+        donor=user,
+        latitude=latitude,
+        longitude=longitude,
+        radius_km=radius_km,
     )
-    all_requests = session.exec(stmt).all()
-
-    results = []
-    for req in all_requests:
-        if request_service.has_completed_commitment(session, req.id, user.id):
-            continue
-        dist = haversine_distance(latitude, longitude, req.latitude, req.longitude)
-        if dist <= radius_km:
-            results.append((req, dist))
-
-    results.sort(key=lambda item: item[1])
     total = len(results)
     page = results[offset : offset + limit]
     items = [
@@ -198,6 +164,28 @@ def my_requests(
         request_service.build_response(session, req, viewer=user)
         for req in items_raw
     ]
+    return PaginatedResponse(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=(offset + limit) < total,
+    )
+
+
+@router.get(
+    "/commitments/mine",
+    response_model=PaginatedResponse[DonorCommitmentResponse],
+)
+def my_active_commitments(
+    user: CurrentUser,
+    session: DbSession,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    items, total = list_active_donor_commitments(
+        session, user, limit=limit, offset=offset
+    )
     return PaginatedResponse(
         items=items,
         total=total,

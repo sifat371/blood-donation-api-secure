@@ -1,18 +1,16 @@
 """
 Donor search endpoints (§2.4)
 
-GET /donors/search — find eligible donors by blood_group, location, radius
+GET /donors/search — find eligible red-cell-compatible donors by requested
+recipient blood group, location, and radius.
 """
 
 from fastapi import APIRouter, Query
-from sqlmodel import select
 
 from app.core.deps import CurrentUser, DbSession
-from app.db.models import User
 from app.schemas.donor import DonorResponse
 from app.schemas.common import PaginatedResponse
-from app.services.geo import haversine_distance
-from app.services.eligibility import is_eligible
+from app.services.discovery_service import find_compatible_donors
 
 router = APIRouter(prefix="/donors", tags=["Donor Search"])
 
@@ -21,41 +19,23 @@ router = APIRouter(prefix="/donors", tags=["Donor Search"])
 def search_donors(
     user: CurrentUser,
     session: DbSession,
-    blood_group: str = Query(..., description="Blood group to search for, e.g. O+"),
+    blood_group: str = Query(
+        ..., description="Recipient/requested blood group, e.g. A+"
+    ),
     latitude: float = Query(..., ge=-90, le=90),
     longitude: float = Query(..., ge=-180, le=180),
     radius_km: float = Query(20, ge=1, le=200),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    """
-    Search for eligible donors matching blood_group within radius_km.
-
-    Eligibility = is_available AND (last_donation_date is null OR >= 90 days ago).
-    Results sorted by distance (ascending).
-    """
-    # Fetch all potential donors with matching blood group
-    stmt = select(User).where(
-        User.blood_group == blood_group,
-        User.is_available == True,
-        User.latitude.isnot(None),
-        User.longitude.isnot(None),
-        User.id != user.id,  # exclude self
+    results = find_compatible_donors(
+        session,
+        viewer=user,
+        recipient_blood_group=blood_group,
+        latitude=latitude,
+        longitude=longitude,
+        radius_km=radius_km,
     )
-    candidates = session.exec(stmt).all()
-
-    # Filter by eligibility + distance, compute distance
-    results = []
-    for donor in candidates:
-        if not is_eligible(donor):
-            continue
-        dist = haversine_distance(latitude, longitude, donor.latitude, donor.longitude)
-        if dist <= radius_km:
-            results.append((donor, dist))
-
-    # Sort by distance
-    results.sort(key=lambda x: x[1])
-
     total = len(results)
     page = results[offset : offset + limit]
 

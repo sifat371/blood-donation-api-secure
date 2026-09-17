@@ -13,7 +13,7 @@ from app.db.models import FCMToken, Notification, NotificationDelivery, Notifica
 def create_notification(
     session: Session,
     user_id: int,
-    notification_type: NotificationType,
+    notification_type: NotificationType | str,
     title: str,
     body: str,
     data: Optional[dict] = None,
@@ -36,9 +36,14 @@ def create_notification(
         if existing is not None:
             return existing
 
+    notification_kind = (
+        notification_type.value
+        if isinstance(notification_type, NotificationType)
+        else str(notification_type)
+    )
     notification = Notification(
         user_id=user_id,
-        type=notification_type.value,
+        type=notification_kind,
         title=title,
         body=body,
         data=json.dumps(data) if data else None,
@@ -77,9 +82,5 @@ def create_notification(
 
 
 def send_notification_push(session: Session, notification: Notification) -> None:
-    """Deprecated compatibility shim; delivery is handled by the P3.1 worker.
-
-    Existing lifecycle callers may still invoke this symbol while Task 3 lands,
-    but it intentionally performs no provider/network operation.
-    """
+    """Deprecated compatibility shim; delivery is handled by the P3.1 worker."""
     return None
