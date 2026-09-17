@@ -78,6 +78,41 @@ Interactive API docs: <http://localhost:8000/docs>.
 Config sanity check: <http://localhost:8000/health> reports `environment` and
 whether `push_notifications` initialised.
 
+### Durable notification worker
+
+P3.1 makes notification generation and FCM delivery durable. The API writes
+outbox/delivery rows to the database and **never waits for FCM**. Production must
+therefore run at least one worker process alongside the API:
+
+```bash
+uv run python -m app.workers.notification_worker
+```
+
+Run `uv run alembic upgrade head` before starting either process. PostgreSQL is
+the production coordination backend; multiple workers may run safely because
+due rows are claimed with `FOR UPDATE SKIP LOCKED`. SQLite remains supported for
+local development/tests but must use a single notification worker.
+
+FCM/provider outages do not turn a successful blood-request action into an API
+failure. Unresolved deliveries retry with bounded backoff; exhausted or malformed
+work becomes `Dead` and should be inspected operationally rather than assumed
+delivered. Historical notifications are not retroactively pushed after migration
+or when a new device is registered.
+
+Mobile clients must register a stable installation id with the FCM token:
+
+```json
+{
+  "device_id": "stable-installation-id",
+  "fcm_token": "current-fcm-token",
+  "device_info": "android"
+}
+```
+
+Use `POST /api/v1/profile/fcm-token` to register/rotate a token and
+`DELETE /api/v1/profile/fcm-token/{device_id}` on device logout/removal. Multiple
+active installations may coexist for one account.
+
 ## Tests
 
 ```bash
@@ -90,8 +125,9 @@ uv run pytest -q tests/test_e2e_multi_user.py
 
 The normal unit/API suite uses isolated test databases and never touches
 `blood_donation.db`. GitHub Actions additionally provisions PostgreSQL 16, runs
-`alembic upgrade head`, and executes the migration/commitment/request regression
-subset against the production-target database configuration.
+`alembic upgrade head`, and executes migration, request, notification-worker,
+and PostgreSQL concurrency regressions against the production-target database
+configuration.
 
 ## Smoke check a running server
 
@@ -147,11 +183,12 @@ lifecycle. Stored application timestamps remain UTC for database compatibility.
 ### Database migration boundary
 
 Alembic is mandatory for both SQLite and PostgreSQL. Deployments must migrate the
-database before starting the API:
+database before starting the API and notification worker:
 
 ```bash
 uv run alembic upgrade head
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run python -m app.workers.notification_worker
 ```
 
 Existing unversioned P1 SQLite installations must use
