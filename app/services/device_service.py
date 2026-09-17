@@ -1,17 +1,14 @@
 """FCM installation registration, transfer, and unregister semantics."""
 
+from datetime import timedelta
+
 from fastapi import HTTPException, status
+from sqlalchemy import and_, or_
 from sqlmodel import Session, select
 
+from app.core.config import settings
 from app.core.time import utc_now
 from app.db.models import DeliveryStatus, FCMToken, NotificationDelivery
-
-
-_UNRESOLVED_DELIVERY_STATUSES = (
-    DeliveryStatus.PENDING.value,
-    DeliveryStatus.RETRY.value,
-    DeliveryStatus.PROCESSING.value,
-)
 
 
 def skip_unresolved_deliveries(
@@ -19,14 +16,34 @@ def skip_unresolved_deliveries(
     fcm_token_id: int,
     reason: str,
 ) -> int:
-    """Skip unresolved jobs for an installation that is no longer deliverable."""
+    """Skip deliverable jobs after an installation becomes unusable.
+
+    Pending/retry jobs are safe to cancel immediately. A Processing job belongs
+    to a live worker claim and is skipped only when that claim has no lock time
+    or its lease has expired; fresh in-flight work must be allowed to finish its
+    own state transition.
+    """
+    now = utc_now()
+    cutoff = now - timedelta(
+        seconds=max(settings.notification_worker_lease_seconds, 1)
+    )
     rows = session.exec(
         select(NotificationDelivery).where(
             NotificationDelivery.fcm_token_id == fcm_token_id,
-            NotificationDelivery.status.in_(_UNRESOLVED_DELIVERY_STATUSES),
+            or_(
+                NotificationDelivery.status.in_(
+                    (DeliveryStatus.PENDING.value, DeliveryStatus.RETRY.value)
+                ),
+                and_(
+                    NotificationDelivery.status == DeliveryStatus.PROCESSING.value,
+                    or_(
+                        NotificationDelivery.locked_at.is_(None),
+                        NotificationDelivery.locked_at < cutoff,
+                    ),
+                ),
+            ),
         )
     ).all()
-    now = utc_now()
     for delivery in rows:
         delivery.status = DeliveryStatus.SKIPPED.value
         delivery.last_error = reason
