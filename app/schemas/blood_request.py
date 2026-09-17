@@ -20,8 +20,8 @@ class BloodRequestCreate(BaseModel):
     )
     hospital_name: str = Field(min_length=1, max_length=200)
     hospital_address: Optional[str] = None
-    latitude: Optional[float] = Field(default=None, ge=-90, le=90)
-    longitude: Optional[float] = Field(default=None, ge=-180, le=180)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
     needed_date: date
     contact_number: str = Field(min_length=1, max_length=30)
     notes: Optional[str] = None
@@ -86,6 +86,11 @@ class BloodRequestResponse(BaseModel):
     distance_km: Optional[float] = None
 
     model_config = {"from_attributes": True}
+
+
+class DonorCommitmentResponse(BaseModel):
+    commitment: CommitmentResponse
+    request: BloodRequestResponse
 
 
 class NearbyRequestsParams(BaseModel):
