@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import random
 from collections.abc import Callable
+from datetime import timedelta
 from typing import Literal
 
 from firebase_admin import messaging
@@ -177,6 +178,8 @@ def process_delivery(
         provider_message_id = send(message)
     except Exception as exc:  # provider boundary; state machine classifies below
         category = classify_delivery_failure(exc)
+        # Store only the exception class. Provider messages can contain request
+        # details and must not become an accidental sensitive-data log/audit sink.
         safe_error = type(exc).__name__
         now = utc_now()
 
@@ -222,7 +225,7 @@ def process_delivery(
                     category="transient",
                     error=safe_error,
                 )
-                delivery.available_at = now + __import__("datetime").timedelta(
+                delivery.available_at = now + timedelta(
                     seconds=retry_delay_seconds(delivery.attempts, jitter=jitter)
                 )
                 session.add(delivery)
