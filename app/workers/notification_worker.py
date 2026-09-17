@@ -6,6 +6,7 @@ import os
 import socket
 import time
 from dataclasses import dataclass
+from datetime import timedelta
 from uuid import uuid4
 
 from sqlmodel import Session
@@ -64,7 +65,7 @@ def record_outbox_failure(
         event.status = OutboxStatus.DEAD.value
     else:
         event.status = OutboxStatus.PENDING.value
-        event.available_at = now + __import__("datetime").timedelta(
+        event.available_at = now + timedelta(
             seconds=retry_delay_seconds(event.attempts, jitter=jitter)
         )
     session.add(event)
@@ -99,7 +100,7 @@ def record_delivery_worker_failure(
         delivery.status = DeliveryStatus.DEAD.value
     else:
         delivery.status = DeliveryStatus.RETRY.value
-        delivery.available_at = now + __import__("datetime").timedelta(
+        delivery.available_at = now + timedelta(
             seconds=retry_delay_seconds(delivery.attempts, jitter=jitter)
         )
     session.add(delivery)
