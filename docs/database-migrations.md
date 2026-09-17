@@ -43,6 +43,47 @@ The P1 baseline revision creates the schema that existed immediately before P2,
 including the legacy `blood_requests.accepted_by` column. Later revisions
 transform that schema and its data forward.
 
+## P3.1 notification outbox rollout
+
+Revision `0003_notification_outbox` adds durable notification/outbox state and
+multi-device FCM installations. It preserves existing inbox notifications and
+FCM rows, backfills notification `event_id` values and deterministic legacy
+`device_id` values, and deliberately does **not** fabricate historical delivery
+records because prior FCM provider state is unknowable.
+
+Deploy in this order:
+
+```bash
+uv run alembic upgrade head
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run python -m app.workers.notification_worker
+```
+
+At least one notification worker must run in production. Business API requests
+only commit durable inbox/outbox/delivery state; they never wait for FCM, so a
+Firebase outage does not invalidate a successful blood-request transaction.
+
+PostgreSQL supports multiple worker replicas. Workers claim due rows with
+`FOR UPDATE SKIP LOCKED` and reclaim stale leases after crashes. SQLite is a
+single-worker development/test mode only; do not run concurrent notification
+workers against SQLite.
+
+Operationally inspect `outbox_events` and `notification_deliveries` for `Dead`
+rows. Retry exhaustion or malformed work is intentionally retained for diagnosis
+rather than silently discarded. Historical notifications are not retroactively
+pushed when the migration is applied or when an installation registers later.
+
+Device registration now requires a stable client-generated `device_id`. Token
+rotation updates the same installation, multiple installations may coexist for a
+user, and unregister uses:
+
+```text
+DELETE /api/v1/profile/fcm-token/{device_id}
+```
+
+Pending delivery work is ownership-safe: a token reassigned to another account
+cannot carry the previous account's notification with it.
+
 ## PostgreSQL
 
 Configure a psycopg URL such as:
@@ -60,8 +101,8 @@ uv run alembic upgrade head
 PostgreSQL uses the same Alembic revision history and never runs SQLite
 `PRAGMA`, `sqlite_master`, `SQLModel.metadata.create_all`, or the retired legacy
 startup migration path. GitHub Actions provisions PostgreSQL 16, upgrades a
-fresh database to head, and runs the migration/commitment/request regression
-subset before P2 is eligible to merge.
+fresh database to head, and runs migration, commitment, request, notification,
+and worker-concurrency regressions before the branch is eligible to merge.
 
 ## Application startup boundary
 
@@ -76,9 +117,12 @@ Startup does **not** create, alter, stamp, or upgrade tables. If the database is
 unversioned or its `alembic_version` is behind the repository head, startup
 raises a clear error and the operator must migrate first.
 
+The notification worker follows the same boundary: migrate first, then start the
+worker. It does not create or alter schema on startup.
+
 That separation is deliberate: schema evolution is a deployment action, not an
-API side effect. It also prevents two application replicas from racing to alter
-the same production database during startup.
+API side effect. It also prevents application or worker replicas from racing to
+alter the same production database during startup.
 
 ## Checking revision state
 
