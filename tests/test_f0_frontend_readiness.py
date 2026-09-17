@@ -3,10 +3,11 @@
 from datetime import timedelta
 
 import pytest
+from sqlmodel import select
 
 from app.core.time import business_today
 from app.db.models import BloodGroup, Notification, NotificationType, OutboxEvent
-from app.mcp_tools.tools import create_blood_request
+from app.mcp_tools.tools import create_blood_request, dispatch_tool
 from app.services.notifications import create_notification
 from tests.conftest import valid_request_payload
 
@@ -73,8 +74,8 @@ def test_nearby_feed_hides_requests_when_donor_cannot_accept(
     assert request_id not in {item["id"] for item in response.json()["items"]}
 
 
-def test_active_commitments_endpoint_tracks_donor_commitment(
-    recipient_client, donor_client
+def test_active_commitments_endpoint_tracks_donor_commitment_and_is_private(
+    recipient_client, donor_client, third_client
 ):
     request_id = recipient_client.post(
         f"{API}/blood-requests", json=valid_request_payload(units=2)
@@ -90,6 +91,7 @@ def test_active_commitments_endpoint_tracks_donor_commitment(
     assert body["items"][0]["request"]["id"] == request_id
     # A secured donor may see the private contact fields needed to coordinate.
     assert body["items"][0]["request"]["contact_number"] == "+8801711111111"
+    assert third_client.get(f"{API}/blood-requests/commitments/mine").json()["total"] == 0
 
     withdrawn = donor_client.post(f"{API}/blood-requests/{request_id}/withdraw")
     assert withdrawn.status_code == 200, withdrawn.text
@@ -123,6 +125,51 @@ def test_recipient_can_release_one_committed_donor_and_reopen_capacity(
     )
 
 
+def test_releasing_one_donor_does_not_cancel_other_commitments(
+    recipient_client, donor_client, third_client, donor_user
+):
+    request_id = recipient_client.post(
+        f"{API}/blood-requests",
+        json=valid_request_payload(units=2, blood_group=BloodGroup.AB_POS.value),
+    ).json()["id"]
+    assert donor_client.post(f"{API}/blood-requests/{request_id}/accept").status_code == 200
+    assert third_client.post(f"{API}/blood-requests/{request_id}/accept").status_code == 200
+
+    commitments = recipient_client.get(
+        f"{API}/blood-requests/{request_id}/commitments"
+    ).json()
+    donor_commitment = next(item for item in commitments if item["donor_id"] == donor_user.id)
+
+    released = recipient_client.post(
+        f"{API}/blood-requests/{request_id}/commitments/{donor_commitment['id']}/release"
+    )
+    assert released.status_code == 200, released.text
+    assert released.json()["status"] == "Partially Committed"
+    assert released.json()["units_committed"] == 1
+    assert released.json()["remaining_units"] == 1
+
+    remaining = recipient_client.get(
+        f"{API}/blood-requests/{request_id}/commitments"
+    ).json()
+    assert len(remaining) == 1
+    assert remaining[0]["id"] != donor_commitment["id"]
+
+
+def test_non_recipient_cannot_release_a_commitment(recipient_client, donor_client):
+    request_id = recipient_client.post(
+        f"{API}/blood-requests", json=valid_request_payload(units=1)
+    ).json()["id"]
+    donor_client.post(f"{API}/blood-requests/{request_id}/accept")
+    commitment_id = recipient_client.get(
+        f"{API}/blood-requests/{request_id}/commitments"
+    ).json()[0]["id"]
+
+    response = donor_client.post(
+        f"{API}/blood-requests/{request_id}/commitments/{commitment_id}/release"
+    )
+    assert response.status_code == 403
+
+
 def test_completed_commitment_cannot_be_released(recipient_client, donor_client):
     request_id = recipient_client.post(
         f"{API}/blood-requests", json=valid_request_payload(units=1)
@@ -149,6 +196,16 @@ def test_request_creation_requires_both_coordinates(recipient_client, missing):
     assert response.status_code == 422, response.text
 
 
+def test_mcp_validation_requires_both_request_coordinates(session, sample_user):
+    payload = valid_request_payload()
+    payload.pop("latitude")
+    payload.pop("longitude")
+    result = dispatch_tool(session, sample_user, "CreateBloodRequest", payload)
+    assert "error" in result
+    assert "latitude" in result["error"]
+    assert "longitude" in result["error"]
+
+
 def test_mcp_request_creation_uses_durable_outbox(session, sample_user):
     result = create_blood_request(
         session,
@@ -166,7 +223,7 @@ def test_mcp_request_creation_uses_durable_outbox(session, sample_user):
     assert "error" not in result
     request_id = result["id"]
 
-    events = session.query(OutboxEvent).all()
+    events = session.exec(select(OutboxEvent)).all()
     matching = [
         event
         for event in events
