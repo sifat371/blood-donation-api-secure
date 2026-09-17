@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import time
@@ -23,6 +24,8 @@ from app.db.models import (
 from app.workers.delivery_processor import process_delivery, retry_delay_seconds
 from app.workers.outbox_processor import process_outbox_event
 from app.workers.queue_claims import claim_deliveries, claim_outbox_events
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -63,13 +66,22 @@ def record_outbox_failure(
     event.updated_at = now
     if event.attempts >= max(settings.notification_worker_max_attempts, 1):
         event.status = OutboxStatus.DEAD.value
+        outcome = "outbox_dead"
     else:
         event.status = OutboxStatus.PENDING.value
         event.available_at = now + timedelta(
             seconds=retry_delay_seconds(event.attempts, jitter=jitter)
         )
+        outcome = "outbox_retry"
     session.add(event)
     session.commit()
+    logger.warning(
+        "%s event_id=%s attempts=%s error=%s",
+        outcome,
+        event.id,
+        event.attempts,
+        event.last_error,
+    )
 
 
 def record_delivery_worker_failure(
@@ -98,18 +110,28 @@ def record_delivery_worker_failure(
     delivery.updated_at = now
     if delivery.attempts >= max(settings.notification_worker_max_attempts, 1):
         delivery.status = DeliveryStatus.DEAD.value
+        outcome = "delivery_dead"
     else:
         delivery.status = DeliveryStatus.RETRY.value
         delivery.available_at = now + timedelta(
             seconds=retry_delay_seconds(delivery.attempts, jitter=jitter)
         )
+        outcome = "delivery_retry"
     session.add(delivery)
     session.commit()
+    logger.warning(
+        "%s delivery_id=%s attempts=%s error=%s",
+        outcome,
+        delivery.id,
+        delivery.attempts,
+        delivery.last_error,
+    )
 
 
 def run_once(worker_id: str | None = None) -> WorkerBatchResult:
     """Claim and process one outbox batch followed by one delivery batch."""
     worker_id = worker_id or _worker_id()
+    started = time.monotonic()
     batch_size = max(settings.notification_worker_batch_size, 1)
     lease_seconds = max(settings.notification_worker_lease_seconds, 1)
 
@@ -151,17 +173,32 @@ def run_once(worker_id: str | None = None) -> WorkerBatchResult:
                 record_delivery_worker_failure(session, delivery_id, exc)
             deliveries_processed += 1
 
-    return WorkerBatchResult(
+    result = WorkerBatchResult(
         outbox_claimed=len(outbox_ids),
         outbox_processed=outbox_processed,
         deliveries_claimed=len(delivery_ids),
         deliveries_processed=deliveries_processed,
     )
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    if result.did_work:
+        logger.info(
+            "notification_worker_batch worker_id=%s outbox_claimed=%s "
+            "outbox_processed=%s deliveries_claimed=%s deliveries_processed=%s "
+            "duration_ms=%s",
+            worker_id,
+            result.outbox_claimed,
+            result.outbox_processed,
+            result.deliveries_claimed,
+            result.deliveries_processed,
+            elapsed_ms,
+        )
+    return result
 
 
 def run_forever(worker_id: str | None = None) -> None:
     """Poll durable queues until interrupted."""
     worker_id = worker_id or _worker_id()
+    logger.info("notification_worker_started worker_id=%s", worker_id)
     while True:
         result = run_once(worker_id)
         if not result.did_work:
@@ -172,6 +209,7 @@ def main() -> None:
     try:
         run_forever()
     except KeyboardInterrupt:
+        logger.info("notification_worker_stopped reason=keyboard_interrupt")
         return
 
 
