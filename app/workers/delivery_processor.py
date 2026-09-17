@@ -184,21 +184,24 @@ def process_delivery(
         now = utc_now()
 
         if category == "permanent_token":
-            # Skip this and every other unresolved job before detaching the token
-            # so no historical notification can follow it to another account.
+            # Cancel other unresolved jobs for this installation. A fresh
+            # Processing row is deliberately excluded by the helper so an
+            # unrelated live worker claim is not clobbered. This current row is
+            # owned by us, so terminate it explicitly below.
             skip_unresolved_deliveries(session, device.id, "permanent_token")
+            _finish(
+                session,
+                delivery,
+                status=DeliveryStatus.SKIPPED,
+                category="permanent_token",
+                error=safe_error,
+            )
             device.token = None
             device.is_active = False
             device.disabled_at = now
             device.last_failure_reason = "permanent_token"
             device.updated_at = now
             session.add(device)
-            # skip_unresolved_deliveries already made this row terminal; retain
-            # the actual attempt count from this provider call.
-            delivery.last_error = safe_error
-            delivery.last_error_category = "permanent_token"
-            delivery.updated_at = now
-            session.add(delivery)
         elif category == "malformed":
             _finish(
                 session,
