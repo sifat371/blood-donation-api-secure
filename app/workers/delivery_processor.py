@@ -9,6 +9,7 @@ notification content into logs or stored provider errors.
 from __future__ import annotations
 
 import json
+import logging
 import random
 from collections.abc import Callable
 from datetime import timedelta
@@ -28,6 +29,7 @@ from app.db.models import (
 )
 from app.services.device_service import skip_unresolved_deliveries
 
+logger = logging.getLogger(__name__)
 
 FailureCategory = Literal["permanent_token", "transient", "malformed"]
 
@@ -109,6 +111,16 @@ def _finish(
     session.add(delivery)
 
 
+def _log_outcome(delivery: NotificationDelivery) -> None:
+    logger.info(
+        "notification_delivery_outcome delivery_id=%s status=%s attempts=%s category=%s",
+        delivery.id,
+        delivery.status,
+        delivery.attempts,
+        delivery.last_error_category or "none",
+    )
+
+
 def process_delivery(
     session: Session,
     delivery_id: int,
@@ -140,6 +152,7 @@ def process_delivery(
             error="missing_delivery_dependency",
         )
         session.commit()
+        _log_outcome(delivery)
         return
 
     if (
@@ -155,6 +168,7 @@ def process_delivery(
             error="device_not_deliverable",
         )
         session.commit()
+        _log_outcome(delivery)
         return
 
     delivery.attempts += 1
@@ -202,6 +216,11 @@ def process_delivery(
             device.last_failure_reason = "permanent_token"
             device.updated_at = now
             session.add(device)
+            logger.warning(
+                "notification_device_disabled fcm_token_id=%s user_id=%s reason=permanent_token",
+                device.id,
+                device.user_id,
+            )
         elif category == "malformed":
             _finish(
                 session,
@@ -233,6 +252,7 @@ def process_delivery(
                 )
                 session.add(delivery)
         session.commit()
+        _log_outcome(delivery)
         return
 
     delivery.status = DeliveryStatus.DELIVERED.value
@@ -245,3 +265,4 @@ def process_delivery(
     delivery.updated_at = utc_now()
     session.add(delivery)
     session.commit()
+    _log_outcome(delivery)
