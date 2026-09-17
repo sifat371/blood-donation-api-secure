@@ -1,6 +1,7 @@
 """P3.1 durable worker claim, lease, recovery, and orchestration contracts."""
 
 from datetime import timedelta
+from uuid import uuid4
 
 from sqlmodel import Session
 
@@ -23,7 +24,7 @@ def _event(session, *, status=OutboxStatus.PENDING.value, available_at=None, loc
         aggregate_type="test",
         aggregate_id="1",
         payload_json="{}",
-        idempotency_key=f"worker-test:{now.timestamp()}:{id(object())}",
+        idempotency_key=f"worker-test:{uuid4().hex}",
         status=status,
         available_at=available_at or now,
         locked_at=locked_at,
@@ -37,10 +38,11 @@ def _event(session, *, status=OutboxStatus.PENDING.value, available_at=None, loc
 
 def _delivery(session, sample_user, *, status=DeliveryStatus.PENDING.value, available_at=None, locked_at=None):
     now = utc_now()
+    token = uuid4().hex
     device = FCMToken(
         user_id=sample_user.id,
-        device_id=f"worker-device-{id(object())}",
-        token=f"worker-token-{id(object())}",
+        device_id=f"worker-device-{token}",
+        token=f"worker-token-{token}",
         device_info="android",
     )
     session.add(device)
