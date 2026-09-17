@@ -3,11 +3,21 @@
 from datetime import datetime, date
 from enum import Enum
 from typing import Optional
+from uuid import uuid4
 
 from sqlmodel import SQLModel, Field, Column
 from sqlalchemy import CheckConstraint, Text, UniqueConstraint
 
 from app.core.time import utc_now
+
+
+def _new_event_id() -> str:
+    return str(uuid4())
+
+
+def _new_runtime_device_id() -> str:
+    """Transitional id for callers that Task 2 will replace with explicit device_id."""
+    return f"legacy-runtime-{uuid4()}"
 
 
 class BloodGroup(str, Enum):
@@ -37,6 +47,22 @@ class CommitmentStatus(str, Enum):
     COMPLETED = "Completed"
     WITHDRAWN = "Withdrawn"
     CANCELLED = "Cancelled"
+
+
+class OutboxStatus(str, Enum):
+    PENDING = "Pending"
+    PROCESSING = "Processing"
+    COMPLETED = "Completed"
+    DEAD = "Dead"
+
+
+class DeliveryStatus(str, Enum):
+    PENDING = "Pending"
+    PROCESSING = "Processing"
+    DELIVERED = "Delivered"
+    RETRY = "Retry"
+    DEAD = "Dead"
+    SKIPPED = "Skipped"
 
 
 class NotificationType(str, Enum):
@@ -90,11 +116,20 @@ class User(SQLModel, table=True):
 
 class FCMToken(SQLModel, table=True):
     __tablename__ = "fcm_tokens"
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_id", name="uq_fcm_tokens_user_device"),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id", index=True)
-    token: str = Field(unique=True, index=True)
+    token: Optional[str] = Field(default=None, unique=True, index=True)
+    device_id: str = Field(default_factory=_new_runtime_device_id)
     device_info: str = Field(default="android")
+    is_active: bool = Field(default=True, index=True)
+    last_seen_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    disabled_at: Optional[datetime] = Field(default=None)
+    last_failure_reason: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -172,12 +207,65 @@ class Notification(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id", index=True)
+    event_id: str = Field(default_factory=_new_event_id, unique=True, index=True)
+    dedupe_key: Optional[str] = Field(default=None, unique=True, index=True)
     type: str
     title: str
     body: str = Field(sa_column=Column(Text))
     data: Optional[str] = Field(default=None, sa_column=Column(Text))
     is_read: bool = Field(default=False)
     created_at: datetime = Field(default_factory=utc_now)
+
+
+class OutboxEvent(SQLModel, table=True):
+    __tablename__ = "outbox_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key", name="uq_outbox_events_idempotency_key"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    event_type: str
+    aggregate_type: str
+    aggregate_id: str
+    payload_json: str = Field(sa_column=Column(Text))
+    idempotency_key: str
+    status: str = Field(default=OutboxStatus.PENDING.value, index=True)
+    attempts: int = Field(default=0)
+    available_at: datetime = Field(default_factory=utc_now, index=True)
+    locked_at: Optional[datetime] = Field(default=None)
+    locked_by: Optional[str] = Field(default=None)
+    last_error: Optional[str] = Field(default=None, sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    completed_at: Optional[datetime] = Field(default=None)
+
+
+class NotificationDelivery(SQLModel, table=True):
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint(
+            "notification_id",
+            "fcm_token_id",
+            name="uq_notification_delivery_notification_device",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    notification_id: int = Field(foreign_key="notifications.id", index=True)
+    fcm_token_id: int = Field(foreign_key="fcm_tokens.id", index=True)
+    status: str = Field(default=DeliveryStatus.PENDING.value, index=True)
+    attempts: int = Field(default=0)
+    available_at: datetime = Field(default_factory=utc_now, index=True)
+    locked_at: Optional[datetime] = Field(default=None)
+    locked_by: Optional[str] = Field(default=None)
+    provider_message_id: Optional[str] = Field(default=None)
+    last_error: Optional[str] = Field(default=None, sa_column=Column(Text))
+    last_error_category: Optional[str] = Field(default=None)
+    delivered_at: Optional[datetime] = Field(default=None)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class RefreshToken(SQLModel, table=True):

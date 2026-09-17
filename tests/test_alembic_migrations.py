@@ -194,7 +194,7 @@ def test_multi_donor_revision_preserves_and_transforms_legacy_request_state(tmp_
     url = f"sqlite:///{db}"
     _make_versioned_p1_transformation_fixture(db)
 
-    command.upgrade(_config(url), "head")
+    command.upgrade(_config(url), "0002_multi_donor")
 
     engine = create_engine(url)
     inspector = inspect(engine)

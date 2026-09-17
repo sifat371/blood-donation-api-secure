@@ -3,17 +3,19 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class FCMTokenUpsertRequest(BaseModel):
-    fcm_token: str
-    device_info: Optional[str] = "android"
+    device_id: str = Field(min_length=1)
+    fcm_token: str = Field(min_length=1)
+    device_info: str = "android"
 
 
 class NotificationResponse(BaseModel):
     id: int
     user_id: int
+    event_id: str
     type: str
     title: str
     body: str

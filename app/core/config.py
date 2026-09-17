@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     # (not fatal) when this is unset or the file is missing.
     fcm_credentials_path: str = ""
 
+    # Durable notification worker. Retry delays are seconds for failed attempts
+    # 1..N; the worker uses the last entry if max attempts exceeds the list.
+    notification_worker_poll_seconds: float = 2.0
+    notification_worker_batch_size: int = 25
+    notification_worker_lease_seconds: int = 120
+    notification_worker_max_attempts: int = 5
+    notification_worker_retry_seconds: list[int] = [60, 300, 1800, 7200, 43200]
+    notification_worker_id: str = ""
+
     # CORS — comma-separated list of allowed origins, or "*" for any.
     # "*" is only honoured outside production; it also forces
     # allow_credentials=False because "*" + credentials is invalid per spec.

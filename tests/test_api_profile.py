@@ -308,7 +308,11 @@ def test_registering_an_fcm_token_binds_it_to_the_caller(
 ):
     response = recipient_client.post(
         f"{API}/profile/fcm-token",
-        json={"fcm_token": "device-token-recipient", "device_info": "android"},
+        json={
+            "device_id": "recipient-phone",
+            "fcm_token": "device-token-recipient",
+            "device_info": "android",
+        },
     )
     assert response.status_code == 200, response.text
 
@@ -319,11 +323,18 @@ def test_registering_an_fcm_token_binds_it_to_the_caller(
     ).first()
     assert stored is not None
     assert stored.user_id == sample_user.id
+    assert stored.device_id == "recipient-phone"
 
 
 def test_re_registering_updates_rather_than_duplicates(recipient_client, session, sample_user):
-    recipient_client.post(f"{API}/profile/fcm-token", json={"fcm_token": "token-v1"})
-    recipient_client.post(f"{API}/profile/fcm-token", json={"fcm_token": "token-v2"})
+    recipient_client.post(
+        f"{API}/profile/fcm-token",
+        json={"device_id": "phone", "fcm_token": "token-v1"},
+    )
+    recipient_client.post(
+        f"{API}/profile/fcm-token",
+        json={"device_id": "phone", "fcm_token": "token-v2"},
+    )
 
     from sqlmodel import select
 
@@ -331,6 +342,7 @@ def test_re_registering_updates_rather_than_duplicates(recipient_client, session
         select(FCMToken).where(FCMToken.user_id == sample_user.id)
     ).all()
     assert len(rows) == 1
+    assert rows[0].device_id == "phone"
     assert rows[0].token == "token-v2"
 
 
@@ -344,18 +356,35 @@ def test_a_shared_device_reassigns_the_token_to_whoever_signed_in(
     user keeps receiving alerts meant for the current one.
     """
     shared = "one-physical-device"
-    recipient_client.post(f"{API}/profile/fcm-token", json={"fcm_token": shared})
-    donor_client.post(f"{API}/profile/fcm-token", json={"fcm_token": shared})
+    recipient_client.post(
+        f"{API}/profile/fcm-token",
+        json={"device_id": "shared-phone", "fcm_token": shared},
+    )
+    donor_client.post(
+        f"{API}/profile/fcm-token",
+        json={"device_id": "shared-phone", "fcm_token": shared},
+    )
 
     from sqlmodel import select
 
     rows = session.exec(select(FCMToken).where(FCMToken.token == shared)).all()
     assert len(rows) == 1
     assert rows[0].user_id == donor_user.id
+    old = session.exec(
+        select(FCMToken).where(
+            FCMToken.user_id == sample_user.id,
+            FCMToken.device_id == "shared-phone",
+        )
+    ).one()
+    assert old.token is None
+    assert old.is_active is False
 
 
 def test_fcm_registration_requires_authentication(client):
-    response = client.post(f"{API}/profile/fcm-token", json={"fcm_token": "anon"})
+    response = client.post(
+        f"{API}/profile/fcm-token",
+        json={"device_id": "anonymous-phone", "fcm_token": "anon"},
+    )
     assert response.status_code == 401
 
 
