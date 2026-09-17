@@ -1,10 +1,14 @@
 """Process durable domain outbox events into notification rows."""
 
+import logging
+
 from sqlmodel import Session
 
 from app.core.time import utc_now
 from app.db.models import OutboxEvent, OutboxStatus
 from app.services.notification_fanout import materialize_blood_request_created
+
+logger = logging.getLogger(__name__)
 
 
 class OutboxProcessingError(RuntimeError):
@@ -35,6 +39,12 @@ def process_outbox_event(session: Session, event_id: int) -> None:
         event.locked_by = None
         session.add(event)
         session.commit()
+        logger.info(
+            "notification_outbox_completed event_id=%s event_type=%s attempts=%s",
+            event.id,
+            event.event_type,
+            event.attempts,
+        )
     except Exception:
         session.rollback()
         raise
