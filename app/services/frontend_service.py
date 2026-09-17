@@ -4,18 +4,14 @@ from fastapi import HTTPException, status
 from sqlmodel import Session, select
 
 from app.core.time import utc_now
-from app.db.models import (
-    BloodRequest,
-    CommitmentStatus,
-    DonationCommitment,
-    NotificationType,
-    User,
-)
+from app.db.models import BloodRequest, CommitmentStatus, DonationCommitment, User
 from app.schemas.blood_request import CommitmentResponse, DonorCommitmentResponse
 from app.services.auth_service import audit_log
 from app.services.commitment_service import recalculate_request_status
 from app.services.notifications import create_notification
 from app.services import request_service
+
+COMMITMENT_RELEASED_NOTIFICATION = "Commitment Released"
 
 
 def _locked_request(session: Session, request_id: int) -> BloodRequest:
@@ -127,7 +123,7 @@ def release_commitment(
         create_notification(
             session,
             commitment.donor_id,
-            NotificationType.COMMITMENT_RELEASED,
+            COMMITMENT_RELEASED_NOTIFICATION,
             "Donation Commitment Released",
             f"Your commitment for the blood request at {blood_request.hospital_name} was released by the recipient.",
             data={
