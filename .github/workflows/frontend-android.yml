@@ -1,0 +1,77 @@
+name: Blood Connect Android
+
+on:
+  push:
+    branches: [feat/blood-connect-android-integration]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-android.yml'
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/frontend-android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Check TypeScript
+        run: npx tsc --noEmit
+      - name: Bundle Android JavaScript
+        run: npx expo export --platform android --output-dir /tmp/blood-connect-bundle --clear
+        env:
+          CI: '1'
+  apk:
+    needs: validate
+    env:
+      EXPO_PUBLIC_ENABLE_DEV_LOGIN: 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: npm ci --no-audit --no-fund
+      - name: Generate disposable debug signing key for installable test APK
+        run: |
+          keytool -genkeypair -v -keystore android/app/debug.keystore \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 3650 \
+            -dname 'CN=Android Debug,O=Android,C=US'
+      - name: Build standalone Android test APK (bundled JS, arm64)
+        run: |
+          chmod +x android/gradlew
+          cd android
+          ./gradlew --no-daemon assembleRelease -PreactNativeArchitectures=arm64-v8a
+        env:
+          CI: '1'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blood-connect-android-test-apk
+          path: frontend/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 7

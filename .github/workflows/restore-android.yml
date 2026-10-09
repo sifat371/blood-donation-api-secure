@@ -1,0 +1,33 @@
+name: Restore Android native project
+on:
+  push:
+    branches: [feat/blood-connect-android-integration]
+    paths: ['.github/workflows/restore-android.yml']
+permissions:
+  contents: write
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore original native sources
+        shell: bash
+        run: |
+          mkdir -p /tmp/bc-parts frontend
+          git fetch --depth=1 origin f0b44f6afab67c07733eaf0c52a7c285c13c5473
+          for n in $(seq 0 9); do
+            i=$(printf '%02d' "$n")
+            git show f0b44f6afab67c07733eaf0c52a7c285c13c5473:_frontend_import/part_$i.b64 > /tmp/bc-parts/part_$i.b64
+          done
+          cat /tmp/bc-parts/part_*.b64 | base64 --decode > /tmp/frontend.zip
+          unzip -q -o /tmp/frontend.zip 'android/*' -d frontend/
+          # No bundled debug keystore or release credential. Generate ephemeral
+          # debug signing material only during the Android CI test build.
+          if [ -f frontend/android/app/build.gradle ]; then
+            sed -i "s/^apply plugin: 'com.google.gms.google-services'.*$/if (file('google-services.json').exists()) { apply plugin: 'com.google.gms.google-services' }/" frontend/android/app/build.gradle
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f frontend/android
+          git commit -m 'Restore native Android configuration for test builds'
+          git push
