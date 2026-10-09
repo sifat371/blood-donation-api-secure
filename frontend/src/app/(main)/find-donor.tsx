@@ -10,9 +10,9 @@ import {
   Pressable,
   FlatList,
   ActivityIndicator,
-  Linking,
 } from 'react-native';
 import { classifyError } from '@/api/errors';
+import { useRouter } from 'expo-router';
 import { useThemeColors, Typography, Spacing, Radius } from '@/theme';
 import { useAuthStore } from '@/store/auth-store';
 import { useLocationStore } from '@/store/location-store';
@@ -32,6 +32,7 @@ function describeError(err: unknown): string {
 
 export default function FindDonorScreen() {
   const colors = useThemeColors();
+  const router = useRouter();
   const user = useAuthStore((s) => s.user);
   const gpsLatitude = useLocationStore((s) => s.latitude);
   const gpsLongitude = useLocationStore((s) => s.longitude);
@@ -111,10 +112,6 @@ export default function FindDonorScreen() {
     }
   };
 
-  const callDonor = (phone: string) => {
-    Linking.openURL(`tel:${phone}`);
-  };
-
   const renderDonor = ({ item }: { item: Donor }) => (
     <View style={[styles.donorCard, { backgroundColor: colors.surface, borderColor: colors.border }]}>
       <View style={styles.donorHeader}>
@@ -133,14 +130,9 @@ export default function FindDonorScreen() {
           Last donated: {item.last_donation_date}
         </Text>
       )}
-      {item.phone && (
-        <Pressable
-          style={[styles.callButton, { backgroundColor: colors.success }]}
-          onPress={() => callDonor(item.phone!)}
-        >
-          <Text style={[styles.callButtonText, { color: '#FFF' }]}>📞 Call</Text>
-        </Pressable>
-      )}
+      <Text style={[styles.donorLastDonation, { color: colors.textSecondary }]}>
+        Phone numbers are private. Create a request to notify matching donors.
+      </Text>
     </View>
   );
 
@@ -222,12 +214,25 @@ export default function FindDonorScreen() {
         ) : null}
       </View>
 
-      {/* Results */}
+      {/* Phone numbers are private; secure requests notify eligible donors. */}
       {searched && !error && (
         <View style={styles.resultHeader}>
           <Text style={[styles.resultCount, { color: colors.textSecondary }]}>
             {total} donor{total !== 1 ? 's' : ''} found
           </Text>
+          {total > 0 && (
+            <Pressable
+              accessibilityRole="button"
+              style={{ paddingVertical: Spacing.sm, paddingHorizontal: Spacing.md,
+                borderRadius: Radius.md, backgroundColor: colors.primary,
+                marginTop: Spacing.sm }}
+              onPress={() => router.push('/(main)/requests/create')}
+            >
+              <Text style={{ color: colors.textOnPrimary, fontWeight: '700' }}>
+                Create a blood request to notify eligible donors
+              </Text>
+            </Pressable>
+          )}
         </View>
       )}
 
