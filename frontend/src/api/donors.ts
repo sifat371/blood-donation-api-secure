@@ -9,7 +9,6 @@ export interface Donor {
   id: number;
   name: string;
   distance_km: number;
-  phone?: string;
   blood_group: string;
   last_donation_date?: string;
   is_available: boolean;
