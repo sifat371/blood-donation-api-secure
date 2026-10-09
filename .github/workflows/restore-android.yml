@@ -14,7 +14,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p /tmp/bc-parts frontend
-          for i in $(seq -w 0 9); do
+          git fetch --depth=1 origin f0b44f6afab67c07733eaf0c52a7c285c13c5473
+          for n in $(seq 0 9); do
+            i=$(printf '%02d' "$n")
             git show f0b44f6afab67c07733eaf0c52a7c285c13c5473:_frontend_import/part_$i.b64 > /tmp/bc-parts/part_$i.b64
           done
           cat /tmp/bc-parts/part_*.b64 | base64 --decode > /tmp/frontend.zip
