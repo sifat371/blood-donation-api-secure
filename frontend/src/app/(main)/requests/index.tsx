@@ -29,7 +29,7 @@ import {
   getMyRequests,
   getNearbyRequests,
   BloodRequest,
-  completeRequest,
+  getMyActiveDonations,
   cancelRequest,
 } from '@/api/blood-requests';
 import { useAuthStore } from '@/store/auth-store';
@@ -38,7 +38,9 @@ import { getLocationPermission } from '@/api/permission-startup';
 
 const STATUS_EMOJIS: Record<string, string> = {
   Pending: '⏳',
-  Accepted: '✅',
+  'Partially Committed': '🩸',
+  'Fully Committed': '✅',
+  Expired: '⌛',
   Completed: '🎉',
   Cancelled: '❌',
 };
@@ -50,7 +52,7 @@ const STATUS_EMOJIS: Record<string, string> = {
  */
 const NEARBY_RADIUS_KM = 50;
 
-type Mode = 'mine' | 'nearby';
+type Mode = 'mine' | 'nearby' | 'committed';
 
 /** Turn a failed load into a sentence the user can act on. */
 function describeError(err: unknown): string {
@@ -104,6 +106,13 @@ export default function RequestsScreen() {
         if (which === 'mine') {
           const result = await getMyRequests();
           setRequests(result.items);
+          setTotal(result.total);
+        } else if (which === 'committed') {
+          const result = await getMyActiveDonations();
+          setRequests(result.items.map((row) => ({
+            ...row.request,
+            my_commitment_status: row.commitment.status,
+          })));
           setTotal(result.total);
         } else {
           const coords = resolveCoordinates();
@@ -160,23 +169,6 @@ export default function RequestsScreen() {
     } as any);
   };
 
-  const handleComplete = async (id: number) => {
-    Alert.alert('Confirm Donation', 'Have you received the blood donation?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Yes, Confirm',
-        onPress: async () => {
-          try {
-            await completeRequest(id);
-            fetchRequests(mode);
-          } catch (e) {
-            Alert.alert('Error', describeActionError(e, 'Failed to complete'));
-          }
-        },
-      },
-    ]);
-  };
-
   const handleCancel = async (id: number) => {
     Alert.alert('Cancel Request', 'Are you sure you want to cancel this request?', [
       { text: 'No', style: 'cancel' },
@@ -198,7 +190,9 @@ export default function RequestsScreen() {
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'Pending': return colors.pending;
-      case 'Accepted': return colors.accepted;
+      case 'Partially Committed':
+      case 'Fully Committed':
+        return colors.accepted;
       case 'Completed': return colors.completed;
       case 'Cancelled': return colors.cancelled;
       default: return colors.textSecondary;
@@ -232,12 +226,14 @@ export default function RequestsScreen() {
           </View>
         </View>
 
-        <Text style={[styles.patientName, { color: colors.text }]}>{item.patient_name}</Text>
+        <Text style={[styles.patientName, { color: colors.text }]}>
+          {item.patient_name || 'Patient details available after commitment'}
+        </Text>
         <Text style={[styles.hospitalName, { color: colors.textSecondary }]}>
           🏥 {item.hospital_name}
         </Text>
         <Text style={[styles.requestDetail, { color: colors.textTertiary }]}>
-          {item.units} unit(s) • Needed: {item.needed_date}
+          {item.units} unit(s) • {item.units_completed ?? 0} received • {item.remaining_units ?? item.units} open • Needed: {item.needed_date}
           {item.distance_km != null ? ` • ${item.distance_km.toFixed(1)} km away` : ''}
         </Text>
 
@@ -251,15 +247,12 @@ export default function RequestsScreen() {
 
         {isMine ? (
           <View style={styles.actionRow}>
-            {item.status === 'Accepted' && (
-              <Pressable
-                style={[styles.actionButton, { backgroundColor: colors.success }]}
-                onPress={() => handleComplete(item.id)}
-              >
-                <Text style={styles.actionButtonText}>Confirm Received</Text>
-              </Pressable>
+            {(item.units_committed ?? 0) > 0 && (
+              <Text style={[styles.tapHint, { color: colors.primary }]}>
+                Open to confirm individual donations →
+              </Text>
             )}
-            {(item.status === 'Pending' || item.status === 'Accepted') && (
+            {['Pending', 'Partially Committed', 'Fully Committed'].includes(item.status) && (
               <Pressable
                 style={[styles.actionButton, { backgroundColor: colors.error + '20', borderColor: colors.error, borderWidth: 1 }]}
                 onPress={() => handleCancel(item.id)}
@@ -270,7 +263,11 @@ export default function RequestsScreen() {
           </View>
         ) : (
           <Text style={[styles.tapHint, { color: colors.primary }]}>
-            {item.status === 'Pending' ? 'Tap to view and accept →' : 'Tap to view →'}
+            {item.my_commitment_status === 'Committed'
+              ? 'Committed • Tap to coordinate or withdraw →'
+              : (item.remaining_units ?? 0) > 0
+                ? 'Tap to commit 1 unit →'
+                : 'Tap to view →'}
           </Text>
         )}
       </Pressable>
@@ -321,14 +318,16 @@ export default function RequestsScreen() {
 
     return (
       <View style={styles.emptyState}>
-        <Text style={styles.emptyEmoji}>{mode === 'mine' ? '📋' : '🔍'}</Text>
+        <Text style={styles.emptyEmoji}>{mode === 'mine' ? '📋' : mode === 'committed' ? '🤝' : '🔍'}</Text>
         <Text style={[styles.emptyTitle, { color: colors.text }]}>
-          {mode === 'mine' ? 'No requests yet' : 'No nearby requests'}
+          {mode === 'mine' ? 'No requests yet' : mode === 'committed' ? 'No active donations' : 'No nearby requests'}
         </Text>
         <Text style={[styles.emptySubtitle, { color: colors.textSecondary }]}>
           {mode === 'mine'
             ? 'Create a blood request when you need it'
-            : `Nobody within ${NEARBY_RADIUS_KM} km needs blood right now. Pull down to refresh.`}
+            : mode === 'committed'
+              ? 'Requests you commit to will appear here until confirmed or withdrawn.'
+              : `Nobody within ${NEARBY_RADIUS_KM} km needs blood right now. Pull down to refresh.`}
         </Text>
       </View>
     );
@@ -349,7 +348,7 @@ export default function RequestsScreen() {
         </View>
 
         <View style={[styles.toggleRow, { backgroundColor: colors.surfaceVariant, borderColor: colors.border }]}>
-          {(['mine', 'nearby'] as Mode[]).map((option) => (
+          {(['mine', 'nearby', 'committed'] as Mode[]).map((option) => (
             <Pressable
               key={option}
               onPress={() => setMode(option)}
@@ -364,7 +363,7 @@ export default function RequestsScreen() {
                   { color: mode === option ? colors.textOnPrimary : colors.textSecondary },
                 ]}
               >
-                {option === 'mine' ? 'My Requests' : 'Nearby'}
+                {option === 'mine' ? 'Mine' : option === 'nearby' ? 'Nearby' : 'Donations'}
               </Text>
             </Pressable>
           ))}
@@ -373,7 +372,9 @@ export default function RequestsScreen() {
         <Text style={[styles.countText, { color: colors.textSecondary }]}>
           {mode === 'mine'
             ? `${total} request(s)`
-            : `${total} request(s) within ${NEARBY_RADIUS_KM} km`}
+            : mode === 'committed'
+              ? `${total} active donation commitment(s)`
+              : `${total} request(s) within ${NEARBY_RADIUS_KM} km`}
         </Text>
       </View>
 
