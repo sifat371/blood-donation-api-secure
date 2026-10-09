@@ -13,8 +13,8 @@ export interface AppNotification {
   type: string;
   title: string;
   body: string;
-  /** JSON-encoded payload, e.g. `{"request_id": 12}`. */
-  data?: string;
+  /** The REST API returns an object or null. */
+  data?: Record<string, unknown> | null;
   is_read: boolean;
   created_at: string;
 }

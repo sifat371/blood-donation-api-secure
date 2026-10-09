@@ -12,6 +12,8 @@ export function StatusBadge({ status }: { status: string }) {
       bgColor = colors.pending + '20';
       textColor = colors.pending;
       break;
+    case 'Partially Committed':
+    case 'Fully Committed':
     case 'Accepted':
       bgColor = colors.accepted + '20';
       textColor = colors.accepted;
@@ -20,6 +22,7 @@ export function StatusBadge({ status }: { status: string }) {
       bgColor = colors.completed + '20';
       textColor = colors.completed;
       break;
+    case 'Expired':
     case 'Cancelled':
       bgColor = colors.cancelled + '20';
       textColor = colors.cancelled;

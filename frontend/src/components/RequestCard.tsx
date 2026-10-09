@@ -18,7 +18,7 @@ export function RequestCard({ request }: Props) {
         </View>
         <StatusBadge status={request.status} />
       </View>
-      <Text style={[styles.name, { color: colors.text }]}>{request.patient_name}</Text>
+      <Text style={[styles.name, { color: colors.text }]}>{request.patient_name || 'Patient details shared after commitment'}</Text>
       <Text style={[styles.hospital, { color: colors.textSecondary }]}>🏥 {request.hospital_name}</Text>
       <Text style={[styles.detail, { color: colors.textTertiary }]}>
         {request.units} unit(s) • Needed: {request.needed_date}

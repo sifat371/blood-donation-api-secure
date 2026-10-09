@@ -1,38 +1,43 @@
-/**
- * Blood requests API functions.
- */
 
+/** Typed REST contract matching the FastAPI P2/F0 multi-donor implementation. */
 import api from './client';
 
-/**
- * How many units one request may ask for. Mirrors the backend rule in
- * `app/schemas/blood_request.py` — keep the two in step, because a mismatch
- * shows up as an unexplained 422 on submit.
- */
 export const MIN_REQUEST_UNITS = 1;
 export const MAX_REQUEST_UNITS = 10;
 
+export type RequestStatus =
+  | 'Pending' | 'Partially Committed' | 'Fully Committed'
+  | 'Completed' | 'Cancelled' | 'Expired';
+
+export type CommitmentStatus = 'Committed' | 'Completed' | 'Withdrawn' | 'Cancelled';
+
 export interface BloodRequest {
   id: number;
-  recipient_id: number;
-  patient_name: string;
+  recipient_id: number | null;
+  patient_name: string | null;
   blood_group: string;
   units: number;
+  units_required: number;
+  units_committed: number;
+  units_completed: number;
+  remaining_units: number;
   hospital_name: string;
-  hospital_address?: string;
-  latitude?: number;
-  longitude?: number;
+  hospital_address?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   needed_date: string;
-  contact_number: string;
-  notes?: string;
-  status: string;
-  accepted_by?: number;
+  contact_number: string | null;
+  notes?: string | null;
+  status: RequestStatus;
+  my_commitment_status?: CommitmentStatus | null;
+  accepted_by?: number | null;
+  legacy_completion_incomplete: boolean;
   created_at: string;
   updated_at: string;
-  recipient_name?: string;
-  donor_name?: string;
-  donor_phone?: string;
-  distance_km?: number;
+  recipient_name?: string | null;
+  donor_name?: string | null;
+  donor_phone?: string | null;
+  distance_km?: number | null;
 }
 
 export interface CreateBloodRequestData {
@@ -41,13 +46,12 @@ export interface CreateBloodRequestData {
   units: number;
   hospital_name: string;
   hospital_address?: string;
-  latitude?: number;
-  longitude?: number;
+  latitude: number;
+  longitude: number;
   needed_date: string;
   contact_number: string;
   notes?: string;
 }
-
 export interface PaginatedResponse<T> {
   items: T[];
   total: number;
@@ -55,53 +59,61 @@ export interface PaginatedResponse<T> {
   offset: number;
   has_more: boolean;
 }
+export interface DonationCommitment {
+  id: number;
+  request_id: number;
+  donor_id: number | null;
+  status: CommitmentStatus;
+  donor_name?: string | null;
+  donor_phone?: string | null;
+  committed_at: string;
+  completed_at?: string | null;
+}
+export interface ActiveDonation {
+  commitment: DonationCommitment;
+  request: BloodRequest;
+}
 
 export async function createBloodRequest(data: CreateBloodRequestData) {
-  const { data: result } = await api.post<BloodRequest>('/blood-requests', data);
-  return result;
+  const response = await api.post<BloodRequest>('/blood-requests', data);
+  return response.data;
 }
-
-/**
- * Fetch a single request.
- *
- * Visible to the recipient and the accepting donor at any status, and to any
- * other authenticated user while the request is Pending or Accepted — which is
- * what lets a donor open a request from the nearby feed or a push notification.
- * Returns 404 both when the request doesn't exist and when the caller isn't
- * allowed to see it, so request IDs can't be enumerated.
- */
-export async function getBloodRequest(requestId: number) {
-  const { data } = await api.get<BloodRequest>(`/blood-requests/${requestId}`);
-  return data;
+export async function getBloodRequest(id: number) {
+  return (await api.get<BloodRequest>(`/blood-requests/${id}`)).data;
 }
-
-export async function acceptRequest(requestId: number) {
-  const { data } = await api.post<BloodRequest>(`/blood-requests/${requestId}/accept`);
-  return data;
+export async function acceptRequest(id: number) {
+  return (await api.post<BloodRequest>(`/blood-requests/${id}/accept`)).data;
 }
-
-export async function completeRequest(requestId: number) {
-  const { data } = await api.post<BloodRequest>(`/blood-requests/${requestId}/complete`);
-  return data;
+export async function withdrawDonation(id: number) {
+  return (await api.post<BloodRequest>(`/blood-requests/${id}/withdraw`)).data;
 }
-
-export async function cancelRequest(requestId: number) {
-  const { data } = await api.post<BloodRequest>(`/blood-requests/${requestId}/cancel`);
-  return data;
+export async function completeRequest(id: number) {
+  // Only valid after *every* unit has been confirmed by the recipient.
+  return (await api.post<BloodRequest>(`/blood-requests/${id}/complete`)).data;
 }
-
+export async function cancelRequest(id: number) {
+  return (await api.post<BloodRequest>(`/blood-requests/${id}/cancel`)).data;
+}
+export async function getRequestCommitments(id: number) {
+  return (await api.get<DonationCommitment[]>(`/blood-requests/${id}/commitments`)).data;
+}
+export async function confirmDonation(id: number, commitmentId: number) {
+  return (await api.post<BloodRequest>(
+    `/blood-requests/${id}/commitments/${commitmentId}/confirm`)).data;
+}
+export async function releaseDonation(id: number, commitmentId: number) {
+  return (await api.post<BloodRequest>(
+    `/blood-requests/${id}/commitments/${commitmentId}/release`)).data;
+}
 export async function getNearbyRequests(params: {
-  latitude: number;
-  longitude: number;
-  radius_km?: number;
-  limit?: number;
-  offset?: number;
+  latitude: number; longitude: number; radius_km?: number; limit?: number; offset?: number;
 }) {
-  const { data } = await api.get<PaginatedResponse<BloodRequest>>('/blood-requests/nearby', { params });
-  return data;
+  return (await api.get<PaginatedResponse<BloodRequest>>('/blood-requests/nearby', {params})).data;
 }
-
-export async function getMyRequests(params?: { limit?: number; offset?: number }) {
-  const { data } = await api.get<PaginatedResponse<BloodRequest>>('/blood-requests/mine', { params });
-  return data;
+export async function getMyRequests(params?: {limit?: number; offset?: number}) {
+  return (await api.get<PaginatedResponse<BloodRequest>>('/blood-requests/mine', {params})).data;
+}
+export async function getMyActiveDonations(params?: {limit?: number; offset?: number}) {
+  return (await api.get<PaginatedResponse<ActiveDonation>>(
+    '/blood-requests/commitments/mine', {params})).data;
 }

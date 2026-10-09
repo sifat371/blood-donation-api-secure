@@ -106,6 +106,10 @@ export default function CreateRequestScreen() {
       return;
     }
 
+    if (!hasLocation) {
+      setError("Location is required. Enable GPS or save your coordinates in Profile.");
+      return;
+    }
     setLoading(true);
     setError("");
     try {
@@ -115,17 +119,15 @@ export default function CreateRequestScreen() {
         units: unitsValue,
         hospital_name: hospitalName,
         hospital_address: hospitalAddress || undefined,
-        latitude: latitude ?? undefined,
-        longitude: longitude ?? undefined,
+        latitude: latitude!,
+        longitude: longitude!,
         needed_date: neededDate,
         contact_number: contactNumber,
         notes: notes || undefined,
       });
       Alert.alert(
         "Request Created!",
-        hasLocation
-          ? "Your blood request has been created. Nearby donors will be notified."
-          : "Your blood request has been created. Because no location was attached, nearby donors were not alerted — add your location in your profile so donors can find it.",
+        "Your blood request has been created. Nearby donors will be notified.",
         [{ text: "OK", onPress: () => router.back() }],
       );
     } catch (e) {
@@ -199,9 +201,8 @@ export default function CreateRequestScreen() {
               { color: colors.error, backgroundColor: colors.errorLight },
             ]}
           >
-            📍 No location saved for your account. Donors are alerted by
-            distance, so this request won&apos;t reach anyone until you add your
-            location from the Profile tab.
+            📍 Location is required. Enable GPS or save coordinates in your
+            Profile before submitting a blood request.
           </Text>
         )}
 

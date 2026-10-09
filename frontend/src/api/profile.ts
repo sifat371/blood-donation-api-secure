@@ -4,6 +4,8 @@
 
 import { PaginatedResponse } from "./blood-requests";
 import api from "./client";
+import * as SecureStore from "expo-secure-store";
+import { Platform } from "react-native";
 
 export interface UserProfile {
   id: number;
@@ -91,11 +93,30 @@ export async function completeProfile(profileData: {
   return data;
 }
 
+const DEVICE_ID_KEY = "blood_connect_installation_id";
+
+/** Stable per-installation identity (not a credential). */
+export async function getInstallationId(): Promise<string> {
+  let id = await SecureStore.getItemAsync(DEVICE_ID_KEY);
+  if (!id) {
+    id = `installation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    await SecureStore.setItemAsync(DEVICE_ID_KEY, id);
+  }
+  return id;
+}
+
 export async function registerFcmToken(fcmToken: string) {
+  const deviceId = await getInstallationId();
   const { data } = await api.post<{ message: string }>("/profile/fcm-token", {
+    device_id: deviceId,
     fcm_token: fcmToken,
+    device_info: Platform.OS,
   });
   return data;
+}
+export async function unregisterFcmDevice() {
+  const id = await SecureStore.getItemAsync(DEVICE_ID_KEY);
+  if (id) await api.delete(`/profile/fcm-token/${encodeURIComponent(id)}`);
 }
 
 export async function getDonationHistory(params?: {

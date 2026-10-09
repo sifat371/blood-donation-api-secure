@@ -20,11 +20,11 @@ export const UserProfileSchema = z.object({
 
 export const BloodRequestSchema = z.object({
   id: z.number(),
-  patient_name: z.string(),
+  patient_name: z.string().nullable(),
   blood_group: BloodGroupSchema,
   units: z.number().min(1),
   hospital_name: z.string(),
-  status: z.enum(['Pending', 'Accepted', 'Completed', 'Cancelled']),
+  status: z.enum(['Pending', 'Partially Committed', 'Fully Committed', 'Completed', 'Cancelled', 'Expired']),
   needed_date: z.string(),
-  contact_number: z.string(),
+  contact_number: z.string().nullable(),
 });
