@@ -1,8 +1,8 @@
-import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { useThemeColors, Typography, Spacing, Radius } from '@/theme';
 import { Donor } from '@/api/donors';
 
-export function DonorCard({ donor, onCall }: { donor: Donor; onCall?: () => void }) {
+export function DonorCard({ donor }: { donor: Donor }) {
   const colors = useThemeColors();
 
   return (
@@ -23,14 +23,9 @@ export function DonorCard({ donor, onCall }: { donor: Donor; onCall?: () => void
           Last donated: {donor.last_donation_date}
         </Text>
       )}
-      {onCall && donor.phone && (
-        <Pressable
-          style={[styles.callButton, { backgroundColor: colors.success }]}
-          onPress={onCall}
-        >
-          <Text style={styles.callButtonText}>📞 Call</Text>
-        </Pressable>
-      )}
+      <Text style={[styles.lastDonation, { color: colors.textSecondary }]}>
+        Phone number private — notify via a blood request.
+      </Text>
     </View>
   );
 }
@@ -72,16 +67,5 @@ const styles = StyleSheet.create({
     fontSize: Typography.sizes.xs,
     marginTop: Spacing.sm,
     marginLeft: 56,
-  },
-  callButton: {
-    marginTop: Spacing.md,
-    paddingVertical: 10,
-    borderRadius: Radius.md,
-    alignItems: 'center',
-  },
-  callButtonText: {
-    fontSize: Typography.sizes.sm,
-    fontWeight: '700',
-    color: '#FFF',
   },
 });
