@@ -22,9 +22,13 @@ import { useAuthStore } from '@/store/auth-store';
 import {
   BloodRequest,
   getBloodRequest,
-  completeRequest,
   cancelRequest,
   acceptRequest,
+  withdrawDonation,
+  confirmDonation,
+  releaseDonation,
+  getRequestCommitments,
+  DonationCommitment,
 } from '@/api/blood-requests';
 import { StatusBadge } from '../../../components/StatusBadge';
 import { MapView } from '@/components/MapView';
@@ -71,6 +75,7 @@ export default function RequestDetailScreen() {
   const requestId = Number(id);
 
   const [request, setRequest] = useState<BloodRequest | null>(null);
+  const [commitments, setCommitments] = useState<DonationCommitment[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<LoadError | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
@@ -88,6 +93,16 @@ export default function RequestDetailScreen() {
       const data = await getBloodRequest(requestId);
       setRequest(data);
       setLoadError(null);
+      if (data.recipient_id === useAuthStore.getState().user?.id) {
+        try {
+          setCommitments(await getRequestCommitments(requestId));
+        } catch (err) {
+          console.warn('Could not load donor commitments:', err);
+          setCommitments([]);
+        }
+      } else {
+        setCommitments([]);
+      }
     } catch (e) {
       setLoadError(describeLoadError(e));
     } finally {
@@ -101,9 +116,9 @@ export default function RequestDetailScreen() {
     }, [fetchRequest])
   );
 
-  const isOwner = request?.recipient_id === user?.id;
+  const isOwner = request?.recipient_id != null && request.recipient_id === user?.id;
 
-  const handleAction = async (action: 'accept' | 'complete' | 'cancel') => {
+  const handleAction = async (action: 'accept' | 'withdraw' | 'cancel') => {
     setActionLoading(true);
     try {
       // Each of these returns the updated request, so render it immediately
@@ -111,9 +126,9 @@ export default function RequestDetailScreen() {
       if (action === 'accept') {
         setRequest(await acceptRequest(requestId));
         Alert.alert('Success', 'You have accepted this blood request!');
-      } else if (action === 'complete') {
-        setRequest(await completeRequest(requestId));
-        Alert.alert('Success', 'Request marked as completed!');
+      } else if (action === 'withdraw') {
+        setRequest(await withdrawDonation(requestId));
+        Alert.alert('Success', 'Your commitment has been withdrawn.');
       } else {
         setRequest(await cancelRequest(requestId));
         Alert.alert('Success', 'Request cancelled.');
@@ -127,6 +142,38 @@ export default function RequestDetailScreen() {
     } finally {
       setActionLoading(false);
     }
+  };
+
+  const handleCommitmentAction = (action: 'confirm' | 'release', commitmentId: number) => {
+    Alert.alert(
+      action === 'confirm' ? 'Confirm donated blood' : 'Release donor',
+      action === 'confirm'
+        ? 'Confirm this donor actually donated one unit? This cannot be undone.'
+        : 'Release this uncompleted commitment and reopen one unit?',
+      [
+        { text: 'Not now', style: 'cancel' },
+        {
+          text: action === 'confirm' ? 'Confirm donation' : 'Release',
+          style: action === 'release' ? 'destructive' : 'default',
+          onPress: async () => {
+            setActionLoading(true);
+            try {
+              if (action === 'confirm') {
+                setRequest(await confirmDonation(requestId, commitmentId));
+              } else {
+                setRequest(await releaseDonation(requestId, commitmentId));
+              }
+              await fetchRequest();
+            } catch (err) {
+              Alert.alert('Error', describeActionError(err, action));
+              await fetchRequest();
+            } finally {
+              setActionLoading(false);
+            }
+          },
+        },
+      ],
+    );
   };
 
   if (loading) {
@@ -193,9 +240,9 @@ export default function RequestDetailScreen() {
             <StatusBadge status={request.status} />
           </View>
 
-          <Text style={[styles.patientName, { color: colors.text }]}>{request.patient_name}</Text>
+          <Text style={[styles.patientName, { color: colors.text }]}>{request.patient_name || 'Patient details are shared after you commit'}</Text>
           <Text style={[styles.detailText, { color: colors.textSecondary }]}>
-            {request.units} Unit(s) needed by {request.needed_date}
+            {request.units_required ?? request.units} unit(s) required • {request.units_committed ?? 0} committed • {request.units_completed ?? 0} confirmed • {request.remaining_units ?? request.units} open • Needed {request.needed_date}
           </Text>
 
           <View style={[styles.divider, { backgroundColor: colors.divider }]} />
@@ -228,7 +275,9 @@ export default function RequestDetailScreen() {
           <View style={[styles.divider, { backgroundColor: colors.divider }]} />
 
           <Text style={[styles.sectionTitle, { color: colors.text }]}>Contact Information</Text>
-          <Text style={[styles.infoText, { color: colors.text }]}>📞 {request.contact_number}</Text>
+          <Text style={[styles.infoText, { color: colors.text }]}>
+            {request.contact_number ? `📞 ${request.contact_number}` : 'Available after a donation commitment'}
+          </Text>
 
           {request.notes && (
             <>
@@ -239,46 +288,83 @@ export default function RequestDetailScreen() {
           )}
         </View>
 
-        {request.donor_name && (
+        {isOwner && (
           <View style={[styles.donorSection, { backgroundColor: colors.surface, borderColor: colors.border }]}>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>Accepted By</Text>
-            <Text style={[styles.infoText, { color: colors.text }]}>👤 {request.donor_name}</Text>
-            {request.donor_phone && (
-              <Text style={[styles.infoText, { color: colors.text }]}>📞 {request.donor_phone}</Text>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Donor commitments</Text>
+            {commitments.length === 0 && (
+              <Text style={[styles.infoText, { color: colors.textSecondary }]}>
+                No donor commitments yet.
+              </Text>
             )}
+            {commitments.map((donor) => (
+              <View key={donor.id} style={{ paddingVertical: Spacing.sm }}>
+                <Text style={[styles.infoText, { color: colors.text }]}>
+                  {donor.donor_name || `Donor #${donor.donor_id}`} • {donor.status}
+                </Text>
+                {donor.donor_phone ? (
+                  <Text style={[styles.infoText, { color: colors.textSecondary }]}>
+                    📞 {donor.donor_phone}
+                  </Text>
+                ) : null}
+                {donor.status === 'Committed' && (
+                  <View style={{ flexDirection: 'row', gap: Spacing.sm, marginTop: Spacing.sm }}>
+                    <Pressable
+                      accessibilityRole="button"
+                      style={[styles.actionButton, { flex: 1, backgroundColor: colors.success }]}
+                      disabled={actionLoading}
+                      onPress={() => handleCommitmentAction('confirm', donor.id)}>
+                      <Text style={styles.actionButtonText}>Confirm 1 unit</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      style={[styles.actionButton, { flex: 1, backgroundColor: colors.error }]}
+                      disabled={actionLoading}
+                      onPress={() => handleCommitmentAction('release', donor.id)}>
+                      <Text style={styles.actionButtonText}>Release</Text>
+                    </Pressable>
+                  </View>
+                )}
+              </View>
+            ))}
           </View>
         )}
 
         <View style={styles.actionContainer}>
-          {isOwner && request.status === 'Accepted' && (
-            <Pressable
-              style={[styles.actionButton, { backgroundColor: colors.success }]}
-              onPress={() => handleAction('complete')}
-              disabled={actionLoading}
-            >
-              <Text style={styles.actionButtonText}>Confirm Donation Received</Text>
-            </Pressable>
-          )}
+          {isOwner &&
+            ['Pending', 'Partially Committed', 'Fully Committed'].includes(request.status) && (
+              <Pressable
+                style={[styles.actionButton, styles.cancelButton, { borderColor: colors.error }]}
+                onPress={() => handleAction('cancel')}
+                disabled={actionLoading}>
+                <Text style={[styles.actionButtonText, { color: colors.error }]}>
+                  Cancel Request
+                </Text>
+              </Pressable>
+            )}
 
-          {isOwner && (request.status === 'Pending' || request.status === 'Accepted') && (
+          {!isOwner && request.my_commitment_status === 'Committed' && (
             <Pressable
-              style={[styles.actionButton, styles.cancelButton, { borderColor: colors.error }]}
-              onPress={() => handleAction('cancel')}
-              disabled={actionLoading}
-            >
-              <Text style={[styles.actionButtonText, { color: colors.error }]}>Cancel Request</Text>
+              style={[styles.actionButton, { backgroundColor: colors.error }]}
+              onPress={() => handleAction('withdraw')}
+              disabled={actionLoading}>
+              <Text style={styles.actionButtonText}>Withdraw my commitment</Text>
             </Pressable>
           )}
-
-          {!isOwner && request.status === 'Pending' && (
-            <Pressable
-              style={[styles.actionButton, { backgroundColor: colors.primary }]}
-              onPress={() => handleAction('accept')}
-              disabled={actionLoading}
-            >
-              <Text style={styles.actionButtonText}>Accept Request</Text>
-            </Pressable>
+          {!isOwner && request.my_commitment_status === 'Completed' && (
+            <Text style={[styles.infoText, { color: colors.success }]}>
+              Your donation is confirmed. Thank you!
+            </Text>
           )}
+          {!isOwner && !['Committed', 'Completed'].includes(request.my_commitment_status || '') &&
+            ['Pending', 'Partially Committed'].includes(request.status) &&
+            request.remaining_units > 0 && (
+              <Pressable
+                style={[styles.actionButton, { backgroundColor: colors.primary }]}
+                onPress={() => handleAction('accept')}
+                disabled={actionLoading}>
+                <Text style={styles.actionButtonText}>Commit to donate 1 unit</Text>
+              </Pressable>
+            )}
         </View>
       </View>
     </ScrollView>
