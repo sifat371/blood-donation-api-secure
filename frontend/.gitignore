@@ -1,0 +1,56 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+#
+# Both plain `.env` and the `.env*.local` variants. `.env` holds the Google web
+# client id and the API URL; EXPO_PUBLIC_* values are inlined into the compiled
+# bundle as plain text, so nothing genuinely secret should ever go in them — but
+# the file is still per-developer configuration, not something to commit.
+# `.env.example` documents the variable names and is committed on purpose.
+.env
+.env.*
+!.env.example
+.env*.local
+
+# Firebase config — identifies the project and its API keys
+google-services.json
+GoogleService-Info.plist
+
+# typescript
+*.tsbuildinfo
+
+example
+
+# generated native folders
+/ios
+/android
