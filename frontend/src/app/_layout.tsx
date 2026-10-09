@@ -94,13 +94,24 @@ export default function RootLayout() {
         console.warn("Auth restore failed at startup:", error);
       }
 
-      // Permissions are requested in parallel but neither can sink the other:
-      // allSettled instead of all. Both are optional — the app is usable with
-      // location and push denied.
-      await Promise.allSettled([
-        getLocationPermission(),
-        getNotificationPermission(),
-      ]);
+      // GPS resolution can take a long time indoors even after permission is
+      // granted. Permission prompts and push registration are optional; do not
+      // hold the entire app on a blank splash screen while waiting for them.
+      // Pending work may finish later and update the stores as usual.
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.allSettled([
+            getLocationPermission(),
+            getNotificationPermission(),
+          ]),
+          new Promise<void>((resolve) => {
+            timeout = setTimeout(resolve, 6500);
+          }),
+        ]);
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+      }
 
       setAppReady(true);
       await SplashScreen.hideAsync().catch(() => {});
