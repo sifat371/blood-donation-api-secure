@@ -265,7 +265,7 @@ export default function RequestDetailScreen() {
                     label: request.hospital_name,
                     latitude: request.latitude,
                     longitude: request.longitude,
-                    detail: request.hospital_address,
+                    detail: request.hospital_address ?? undefined,
                   },
                 ]}
               />

@@ -37,6 +37,8 @@ jobs:
           CI: '1'
   apk:
     needs: validate
+    env:
+      EXPO_PUBLIC_ENABLE_DEV_LOGIN: 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     defaults:
