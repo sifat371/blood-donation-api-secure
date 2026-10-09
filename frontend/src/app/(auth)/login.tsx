@@ -8,7 +8,7 @@
  * three different responses from the user.
  */
 
-import { emailLogin, googleLogin } from "@/api/auth";
+import { devLogin, emailLogin, googleLogin } from "@/api/auth";
 import { classifyError } from "@/api/errors";
 import { getMyProfile } from "@/api/profile";
 import { useAuthStore } from "@/store/auth-store";
@@ -32,9 +32,11 @@ import {
 } from "react-native";
 import { Snackbar } from "react-native-paper";
 
-GoogleSignin.configure({
-  webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
-});
+const googleClientId = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
+const enableDevLogin = process.env.EXPO_PUBLIC_ENABLE_DEV_LOGIN === 'true';
+if (googleClientId) {
+  GoogleSignin.configure({ webClientId: googleClientId });
+}
 
 export default function LoginScreen() {
   const colors = useThemeColors();
@@ -89,6 +91,19 @@ export default function LoginScreen() {
     } else {
       setProfileComplete(true);
       router.replace("/(main)");
+    }
+  };
+
+  const handleDevLogin = async () => {
+    const testEmail = email.trim() || 'bloodconnect-test@example.com';
+    try {
+      setLoading(true);
+      setError('');
+      await enterApp(await devLogin(testEmail, 'Device Tester'));
+    } catch (err) {
+      setError(classifyError(err).message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -238,7 +253,7 @@ export default function LoginScreen() {
 
         {/* Login Section */}
         <View style={styles.loginSection}>
-          <Pressable
+          {googleClientId ? <Pressable
             style={[
               styles.googleButton,
               { backgroundColor: colors.surface, borderColor: colors.border },
@@ -250,7 +265,19 @@ export default function LoginScreen() {
             <Text style={[styles.googleButtonText, { color: colors.text }]}>
               Continue with Google
             </Text>
-          </Pressable>
+          </Pressable> : null}
+
+          {enableDevLogin ? (
+            <Pressable
+              accessibilityRole="button"
+              style={[styles.googleButton, { borderColor: colors.primary, borderWidth: 1 }]}
+              onPress={handleDevLogin}
+              disabled={loading}>
+              <Text style={[styles.googleButtonText, { color: colors.primary }]}>
+                Test login (local backend only)
+              </Text>
+            </Pressable>
+          ) : null}
 
           <View style={styles.dividerRow}>
             <View
